@@ -121,22 +121,41 @@ ITFlowQuickTicketSetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
 ## Deploying via TacticalRMM
 
 1. Get `ITFlowQuickTicketSetup.exe` from a GitHub release (Option A above)
-   and host it somewhere TacticalRMM can download it from.
-2. Run `deploy/deploy_quickticket.ps1` as a TacticalRMM script (System
-   context) per client, with arguments:
+   and host it somewhere TacticalRMM can download it from — the direct
+   release asset URL works fine, e.g.:
 
    ```
-   -InstallerUrl  <url to ITFlowQuickTicketSetup.exe>
-   -ItflowBaseUrl https://itflow.foleyit.com
-   -ApiKey        <API key from Admin > API Keys>
-   -ClientId      <ITFlow client_id for this client>
-   -ContactId     <optional ITFlow contact_id>
-   -Priority      Medium
+   https://github.com/TheTractorHacker/itflow-quick-ticket/releases/latest/download/ITFlowQuickTicketSetup.exe
    ```
+
+2. In TacticalRMM, add `deploy/deploy_quickticket.ps1` as a script (type
+   **PowerShell**, run as **System**), then set its **Script Arguments**
+   to a single line per client, e.g.:
+
+   ```
+   -InstallerUrl "https://github.com/TheTractorHacker/itflow-quick-ticket/releases/latest/download/ITFlowQuickTicketSetup.exe" -ItflowBaseUrl "https://itflow.foleyit.com" -ApiKey "XXXXXXXXXXXXXXXX" -ClientId 5 -ContactId 12 -Priority "Medium"
+   ```
+
+   | Argument | Value |
+   |----------|-------|
+   | `-InstallerUrl`  | URL to `ITFlowQuickTicketSetup.exe` (above) |
+   | `-ItflowBaseUrl` | e.g. `https://itflow.foleyit.com` |
+   | `-ApiKey`        | API key from Admin > API Keys |
+   | `-ClientId`      | ITFlow `client_id` for this client |
+   | `-ContactId`     | (optional) ITFlow `contact_id`, omit or use `0` |
+   | `-Priority`      | (optional) `Low` / `Medium` / `High` / `Critical`, default `Medium` |
 
    This downloads and silently runs the installer with those settings,
    which installs the app, writes `config.json`, and sets up the Startup
    shortcut — then launches the app for the current session if one exists.
+
+### Upgrading
+
+Running the same installer again (manually, or by re-running the
+TacticalRMM script above) upgrades an existing install in place: it closes
+the running tray app, replaces the exe, and restarts it — no uninstall
+step needed. If you don't pass connection settings on an upgrade run, the
+existing `config.json` values are kept automatically.
 
 ## Config reference (`config.json`)
 
