@@ -13,7 +13,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITFlow Quick Ticket"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITFlowQuickTicket.exe"
 

@@ -159,10 +159,38 @@ existing `config.json` values are kept automatically.
 
 ## Config reference (`config.json`)
 
-| Field             | Required | Description                                  |
-|-------------------|----------|-----------------------------------------------|
-| `itflow_base_url` | yes      | e.g. `https://itflow.foleyit.com`              |
-| `api_key`         | yes      | Legacy API key from Admin > API Keys           |
-| `client_id`       | yes      | ITFlow `client_id` this install belongs to     |
-| `contact_id`      | no       | ITFlow `contact_id` to attach to the ticket    |
-| `priority`        | no       | `Low` / `Medium` / `High` / `Critical` (default `Medium`) |
+| Field                  | Required | Description                                  |
+|------------------------|----------|-----------------------------------------------|
+| `itflow_base_url`      | yes      | e.g. `https://itflow.foleyit.com`              |
+| `api_key`               | yes      | Legacy API key from Admin > API Keys           |
+| `client_id`             | yes      | ITFlow `client_id` this install belongs to     |
+| `contact_id`            | no       | ITFlow `contact_id` to attach to the ticket    |
+| `priority`              | no       | `Low` / `Medium` / `High` / `Critical` (default `Medium`) |
+| `include_system_info`   | no       | Auto-attach hostname/OS/user/local IP to ticket details (default `true`) |
+| `check_for_updates`     | no       | Silently check GitHub for newer releases on startup (default `true`) |
+| `accent_color`          | no       | Hex color (e.g. `"#16a34a"`) to re-brand the accent color used in the New Ticket window |
+| `branding_logo`         | no       | Absolute path to a `.png` to use as the tray icon and window header logo instead of the default ITFlow icon |
+
+The installer only prompts for the first five fields above; the branding
+fields are optional and can be added by hand-editing `config.json` after
+install (or templating it in your own deployment scripts).
+
+### Other new features (v1.4.0+)
+
+- **Asset auto-link** — the hostname of the machine is sent with every
+  ticket and matched against the client's Assets in ITFlow (by Asset Name
+  or Asset Tag) to set the ticket's linked asset automatically.
+- **Ticket categories** — if the ITFlow instance has Ticket-type categories
+  configured, a Category dropdown appears in the New Ticket window.
+- **File attachments** — in addition to the screenshot tool, users can
+  attach any file (log, error dialog export, etc.) via "Attach File".
+- **Offline queue** — if the ITFlow server is unreachable when a ticket is
+  submitted, it's saved locally and retried automatically every 5 minutes.
+- **My Recent Tickets** — tray menu item showing this install's recent
+  tickets and their current status.
+- **Status-change notifications** — a desktop notification is shown when a
+  ticket submitted from this device changes status.
+- **Quick Tools** — tray menu submenu with one-click troubleshooting: show
+  this machine's public IP, ping google.com, list installed printers, and
+  restart the print spooler service (the last one may require running the
+  app as Administrator).

@@ -7,24 +7,33 @@ config file locations to check (in order of preference) and the path to
 the tray/window icon image.
 
 This module contains everything that is identical across platforms: config
-loading, the ttk styling, the ticket popup window, and the tray icon /
-event loop wiring.
+loading, the ttk styling, the ticket popup window, the recent-tickets
+window, offline queueing, update checks, the Quick Tools troubleshooting
+menu, and the tray icon / event loop wiring.
 """
 
+import getpass
 import io
 import json
 import os
+import platform
+import shutil
+import socket
+import subprocess
 import sys
 import threading
 import time
+import webbrowser
 
 import requests
 from PIL import Image, ImageDraw, ImageGrab, ImageTk
 import pystray
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITFlow Quick Ticket"
+VERSION = "1.4.0"
+GITHUB_REPO = "TheTractorHacker/itflow-quick-ticket"
 
 ACCENT = "#2563eb"
 ACCENT_DARK = "#1d4ed8"
@@ -42,6 +51,21 @@ def app_dir():
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 
+def data_dir():
+    """Per-user writable directory for the offline queue and ticket tracking."""
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        path = os.path.join(base, "ITFlowQuickTicket")
+    elif system == "Darwin":
+        path = os.path.expanduser("~/Library/Application Support/ITFlowQuickTicket")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        path = os.path.join(base, "itflow-quick-ticket")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def load_config(extra_paths):
     """Return the first config.json found among extra_paths, then app_dir()."""
     candidates = list(extra_paths) + [os.path.join(app_dir(), "config.json")]
@@ -56,10 +80,11 @@ def load_config(extra_paths):
     )
 
 
-def build_tray_icon_image(icon_path):
-    """Load the bundled tray icon, or fall back to a simple drawn one."""
-    if icon_path and os.path.isfile(icon_path):
-        return Image.open(icon_path)
+def build_tray_icon_image(icon_path, branding_logo=None):
+    """Load the branding logo or bundled tray icon, or fall back to a drawn one."""
+    candidate = branding_logo or icon_path
+    if candidate and os.path.isfile(candidate):
+        return Image.open(candidate)
 
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -69,8 +94,22 @@ def build_tray_icon_image(icon_path):
     return img
 
 
-def setup_style(root):
-    """Configure a clean, modern ttk theme shared by every window."""
+def _darken(hex_color, factor=0.82):
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    r, g, b = (max(0, min(255, int(c * factor))) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def setup_style(root, accent=None):
+    """Configure a clean, modern ttk theme shared by every window.
+
+    accent: optional hex color (e.g. "#16a34a") to override the default
+    ITFlow blue, for MSPs that want their own branding color.
+    """
+    accent_color = accent or ACCENT
+    accent_dark = _darken(accent_color) if accent else ACCENT_DARK
+
     style = ttk.Style(root)
     for theme in ("clam",):
         try:
@@ -94,6 +133,7 @@ def setup_style(root):
     style.configure("Muted.TLabel", background=BG, foreground=TEXT_MUTED)
     style.configure("Muted.Card.TLabel", background=CARD_BG, foreground=TEXT_MUTED)
     style.configure("FieldLabel.TLabel", background=BG, font=bold_font, foreground="#374151")
+    style.configure("TCheckbutton", background=BG, foreground="#1f2533")
 
     style.configure(
         "TEntry",
@@ -104,19 +144,28 @@ def setup_style(root):
         darkcolor=BORDER,
         fieldbackground=CARD_BG,
     )
-    style.map("TEntry", bordercolor=[("focus", ACCENT)])
+    style.map("TEntry", bordercolor=[("focus", accent_color)])
+
+    style.configure(
+        "TCombobox",
+        padding=6,
+        relief="flat",
+        fieldbackground=CARD_BG,
+        background=CARD_BG,
+    )
+    style.map("TCombobox", bordercolor=[("focus", accent_color)])
 
     style.configure(
         "Accent.TButton",
         font=bold_font,
-        background=ACCENT,
+        background=accent_color,
         foreground="white",
         borderwidth=0,
         padding=(12, 10),
     )
     style.map(
         "Accent.TButton",
-        background=[("active", ACCENT_DARK), ("disabled", "#9db4e8")],
+        background=[("active", accent_dark), ("disabled", "#9db4e8")],
     )
 
     style.configure(
@@ -135,6 +184,325 @@ def setup_style(root):
     return style
 
 
+# ── System info ───────────────────────────────────────────────────────────
+
+def gather_system_info():
+    try:
+        hostname = socket.gethostname()
+    except Exception:
+        hostname = "unknown"
+
+    try:
+        username = getpass.getuser()
+    except Exception:
+        username = "unknown"
+
+    local_ip = "unknown"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        pass
+
+    return {
+        "hostname": hostname,
+        "os": f"{platform.system()} {platform.release()}",
+        "username": username,
+        "local_ip": local_ip,
+    }
+
+
+def format_system_info_block(info):
+    return (
+        "\n\n--- System Info (auto-attached) ---\n"
+        f"Hostname: {info['hostname']}\n"
+        f"OS: {info['os']}\n"
+        f"User: {info['username']}\n"
+        f"Local IP: {info['local_ip']}"
+    )
+
+
+# ── Quick Tools (troubleshooting) ───────────────────────────────────────────
+
+def get_public_ip():
+    try:
+        resp = requests.get("https://api.ipify.org?format=json", timeout=8)
+        resp.raise_for_status()
+        return resp.json().get("ip", "Unknown")
+    except Exception as exc:
+        return f"Could not determine public IP: {exc}"
+
+
+def ping_host(host="google.com"):
+    count_flag = "-n" if platform.system() == "Windows" else "-c"
+    try:
+        result = subprocess.run(
+            ["ping", count_flag, "4", host],
+            capture_output=True, text=True, timeout=20,
+        )
+        return (result.stdout or result.stderr).strip()
+    except FileNotFoundError:
+        return "ping command not available on this system."
+    except Exception as exc:
+        return f"Error pinging {host}: {exc}"
+
+
+def list_printers():
+    system = platform.system()
+    try:
+        if system == "Windows":
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-Printer | Select-Object -ExpandProperty Name"],
+                capture_output=True, text=True, timeout=20,
+            )
+            names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        else:
+            result = subprocess.run(["lpstat", "-p"], capture_output=True, text=True, timeout=20)
+            names = []
+            for line in result.stdout.splitlines():
+                if line.startswith("printer "):
+                    names.append(line.split()[1])
+
+        if not names:
+            return "No printers found."
+        return "\n".join(names)
+    except FileNotFoundError:
+        return "Printer listing tool not available on this system."
+    except Exception as exc:
+        return f"Error listing printers: {exc}"
+
+
+def restart_print_spooler():
+    system = platform.system()
+    try:
+        if system == "Windows":
+            subprocess.run(["net", "stop", "spooler"], capture_output=True, text=True, timeout=30, check=True)
+            subprocess.run(["net", "start", "spooler"], capture_output=True, text=True, timeout=30, check=True)
+            return "Print spooler restarted successfully."
+        elif system == "Darwin":
+            subprocess.run(["launchctl", "stop", "org.cups.cupsd"], capture_output=True, text=True, timeout=30, check=True)
+            subprocess.run(["launchctl", "start", "org.cups.cupsd"], capture_output=True, text=True, timeout=30, check=True)
+            return "Print service (CUPS) restarted successfully."
+        else:
+            subprocess.run(["systemctl", "restart", "cups"], capture_output=True, text=True, timeout=30, check=True)
+            return "Print service (CUPS) restarted successfully."
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        return (
+            "Couldn't restart the print service - this usually requires "
+            "administrator/root privileges.\n\n" + detail
+        )
+    except FileNotFoundError:
+        return "Print service control tool not available on this system."
+    except Exception as exc:
+        return f"Error restarting print service: {exc}"
+
+
+def tool_public_ip():
+    return f"Your public IP address is:\n\n{get_public_ip()}"
+
+
+def tool_ping():
+    return "Pinging google.com...\n\n" + ping_host("google.com")
+
+
+def tool_list_printers():
+    return "Installed printers:\n\n" + list_printers()
+
+
+def tool_restart_spooler():
+    return restart_print_spooler()
+
+
+def run_quick_tool(root, title, func):
+    """Run a (possibly slow/blocking) tool function in a background thread
+    and show its result in a message box on the Tk main thread."""
+    def worker():
+        try:
+            result = func()
+        except Exception as exc:
+            result = f"Error: {exc}"
+        root.after(0, lambda: messagebox.showinfo(title, result))
+    threading.Thread(target=worker, daemon=True).start()
+
+
+# ── Offline queue ────────────────────────────────────────────────────────
+
+def queue_dir():
+    path = os.path.join(data_dir(), "queue")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def save_to_queue(data, files_payload):
+    """Persist a ticket submission to retry later.
+
+    files_payload: list of (field_name, filename, bytes, content_type)
+    """
+    item_dir = os.path.join(queue_dir(), str(int(time.time() * 1000)))
+    os.makedirs(item_dir, exist_ok=True)
+
+    with open(os.path.join(item_dir, "payload.json"), "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    manifest = []
+    for i, (field_name, filename, content, content_type) in enumerate(files_payload):
+        stored_as = f"file_{i}_{filename}"
+        with open(os.path.join(item_dir, stored_as), "wb") as f:
+            f.write(content)
+        manifest.append({
+            "field": field_name, "filename": filename,
+            "stored_as": stored_as, "content_type": content_type,
+        })
+
+    with open(os.path.join(item_dir, "files.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+
+
+def flush_queue(config):
+    """Try to resend queued tickets. Stops at the first failure (assumed
+    still offline). Returns the number successfully sent."""
+    qdir = queue_dir()
+    sent = 0
+    for name in sorted(os.listdir(qdir)):
+        item_dir = os.path.join(qdir, name)
+        payload_path = os.path.join(item_dir, "payload.json")
+        if not os.path.isfile(payload_path):
+            continue
+
+        try:
+            with open(payload_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            files = None
+            manifest_path = os.path.join(item_dir, "files.json")
+            if os.path.isfile(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                if manifest:
+                    files = []
+                    for entry in manifest:
+                        with open(os.path.join(item_dir, entry["stored_as"]), "rb") as fh:
+                            files.append((entry["field"], (entry["filename"], fh.read(), entry["content_type"])))
+
+            base_url = config["itflow_base_url"].rstrip("/")
+            resp = requests.post(
+                f"{base_url}/api/v1/tickets",
+                params={"api_key": config["api_key"]},
+                data=data,
+                files=files,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            if "id" in result:
+                track_new_ticket(result["id"], result.get("number", "?"), data.get("subject", ""))
+
+            shutil.rmtree(item_dir, ignore_errors=True)
+            sent += 1
+        except Exception:
+            break
+
+    return sent
+
+
+# ── Ticket tracking (for status-change notifications) ──────────────────────
+
+def tracked_tickets_path():
+    return os.path.join(data_dir(), "tracked_tickets.json")
+
+
+def load_tracked_tickets():
+    path = tracked_tickets_path()
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_tracked_tickets(tickets):
+    with open(tracked_tickets_path(), "w", encoding="utf-8") as f:
+        json.dump(tickets, f)
+
+
+def track_new_ticket(ticket_id, number, subject, status="New"):
+    tickets = load_tracked_tickets()
+    tickets.append({"id": ticket_id, "number": number, "subject": subject, "status": status})
+    save_tracked_tickets(tickets[-20:])
+
+
+def poll_ticket_updates(config, icon):
+    """Check tracked tickets for status changes and show a notification."""
+    tickets = load_tracked_tickets()
+    if not tickets:
+        return
+
+    base_url = config["itflow_base_url"].rstrip("/")
+    changed = False
+    for t in tickets:
+        try:
+            resp = requests.get(
+                f"{base_url}/api/v1/tickets/{t['id']}",
+                params={"api_key": config["api_key"]},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            new_status = resp.json().get("status", t["status"])
+            if new_status and new_status != t["status"]:
+                try:
+                    icon.notify(
+                        f"Ticket #{t['number']} \"{t['subject']}\" is now {new_status}",
+                        title="ITFlow Ticket Update",
+                    )
+                except Exception:
+                    pass
+                t["status"] = new_status
+                changed = True
+        except Exception:
+            continue
+
+    if changed:
+        save_tracked_tickets(tickets)
+
+
+# ── Update check ─────────────────────────────────────────────────────────
+
+def _version_tuple(v):
+    parts = []
+    for p in v.split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def check_for_update():
+    """Return (latest_version, html_url) if a newer release is available."""
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest", timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        tag = (data.get("tag_name") or "").lstrip("v")
+        if tag and _version_tuple(tag) > _version_tuple(VERSION):
+            return tag, data.get("html_url")
+    except Exception:
+        return None
+    return None
+
+
+# ── Ticket entry window ─────────────────────────────────────────────────────
+
 class TicketWindow:
     """The popup ticket-entry window. One instance reused per open."""
 
@@ -143,6 +511,9 @@ class TicketWindow:
         self.config = config
         self.icon_path = icon_path
         self.screenshot_bytes = None
+        self.attached_file_path = None
+        self.categories = []
+        self.selected_category_id = 0
         self.window = None
         self._header_img = None
         self._thumb_image = None
@@ -155,6 +526,8 @@ class TicketWindow:
             return
 
         self.screenshot_bytes = None
+        self.attached_file_path = None
+        self.selected_category_id = 0
 
         win = tk.Toplevel(self.root)
         win.title(APP_NAME)
@@ -195,6 +568,18 @@ class TicketWindow:
         self.subject_entry = ttk.Entry(outer, width=46)
         self.subject_entry.pack(fill="x", pady=(0, 14))
 
+        # Category (only shown if the server has ticket categories configured)
+        if self.categories:
+            ttk.Label(outer, text="Category", style="FieldLabel.TLabel").pack(anchor="w", pady=(0, 4))
+            self.category_var = tk.StringVar(value="Uncategorized")
+            category_names = ["Uncategorized"] + [c["name"] for c in self.categories]
+            self.category_combo = ttk.Combobox(
+                outer, textvariable=self.category_var, values=category_names,
+                state="readonly", width=43,
+            )
+            self.category_combo.pack(fill="x", pady=(0, 14))
+            self.category_combo.bind("<<ComboboxSelected>>", self._on_category_selected)
+
         # Description
         ttk.Label(outer, text="Describe the issue", style="FieldLabel.TLabel").pack(anchor="w", pady=(0, 4))
         text_frame = tk.Frame(outer, bg=BORDER, padx=1, pady=1)
@@ -214,6 +599,13 @@ class TicketWindow:
         )
         self.details_text.pack(fill="both", expand=True)
 
+        # System info checkbox
+        self.include_sysinfo_var = tk.BooleanVar(value=self.config.get("include_system_info", True))
+        ttk.Checkbutton(
+            outer, text="Include system info (helps us diagnose faster)",
+            variable=self.include_sysinfo_var,
+        ).pack(anchor="w", pady=(0, 10))
+
         # Screenshot preview area
         preview_frame = tk.Frame(outer, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
         preview_frame.pack(fill="x", pady=(0, 10))
@@ -229,7 +621,7 @@ class TicketWindow:
 
         # Screenshot buttons
         btn_row = ttk.Frame(outer, style="TFrame")
-        btn_row.pack(fill="x", pady=(0, 14))
+        btn_row.pack(fill="x", pady=(0, 10))
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(1, weight=1)
 
@@ -242,6 +634,16 @@ class TicketWindow:
             btn_row, text="Remove Screenshot", style="Secondary.TButton", command=self.remove_screenshot, state="disabled"
         )
         self.remove_btn.grid(row=0, column=1, sticky="we", padx=(6, 0))
+
+        # File attachment
+        file_row = ttk.Frame(outer, style="TFrame")
+        file_row.pack(fill="x", pady=(0, 14))
+        self.attach_file_btn = ttk.Button(
+            file_row, text="Attach File", style="Secondary.TButton", command=self.choose_file
+        )
+        self.attach_file_btn.pack(side="left")
+        self.file_label = ttk.Label(file_row, text="No file attached", style="Muted.TLabel")
+        self.file_label.pack(side="left", padx=(10, 0))
 
         # Status + submit
         self.status_label = ttk.Label(outer, text="", style="Muted.TLabel", wraplength=380)
@@ -257,6 +659,19 @@ class TicketWindow:
         win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
 
         self.subject_entry.focus_set()
+
+    def _on_category_selected(self, event=None):
+        name = self.category_var.get()
+        self.selected_category_id = next(
+            (c["id"] for c in self.categories if c["name"] == name), 0
+        )
+
+    def choose_file(self):
+        path = filedialog.askopenfilename(parent=self.window, title="Select a file to attach")
+        if path:
+            self.attached_file_path = path
+            self.file_label.configure(text=os.path.basename(path))
+            self.attach_file_btn.configure(text="Change File")
 
     def take_screenshot(self):
         # Hide our window so it isn't part of the capture
@@ -315,8 +730,8 @@ class TicketWindow:
 
     def _submit_worker(self, subject, details):
         try:
-            self._send_ticket(subject, details)
-            self.window.after(0, self._submit_success)
+            result = self._send_ticket(subject, details)
+            self.window.after(0, self._submit_success, result)
         except Exception as exc:
             self.window.after(0, self._submit_error, str(exc))
 
@@ -325,33 +740,59 @@ class TicketWindow:
         base_url = cfg["itflow_base_url"].rstrip("/")
         url = f"{base_url}/api/v1/tickets"
 
+        if self.include_sysinfo_var.get():
+            details = details + format_system_info_block(gather_system_info())
+
         data = {
             "subject": subject,
             "details": details,
             "client_id": cfg["client_id"],
             "priority": cfg.get("priority", "Medium"),
+            "hostname": socket.gethostname(),
         }
         if cfg.get("contact_id"):
             data["contact_id"] = cfg["contact_id"]
+        if self.selected_category_id:
+            data["category_id"] = self.selected_category_id
 
-        files = None
+        files = []
         if self.screenshot_bytes:
-            files = {"file": ("screenshot.png", self.screenshot_bytes, "image/png")}
+            files.append(("files[]", ("screenshot.png", self.screenshot_bytes, "image/png")))
+        if self.attached_file_path:
+            with open(self.attached_file_path, "rb") as f:
+                file_bytes = f.read()
+            files.append(("files[]", (os.path.basename(self.attached_file_path), file_bytes, "application/octet-stream")))
 
-        resp = requests.post(
-            url,
-            params={"api_key": cfg["api_key"]},
-            data=data,
-            files=files,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = requests.post(
+                url,
+                params={"api_key": cfg["api_key"]},
+                data=data,
+                files=files or None,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        except requests.exceptions.RequestException:
+            files_payload = [(field, f[0], f[1], f[2]) for field, f in files]
+            save_to_queue(data, files_payload)
+            return {"queued": True}
 
-    def _submit_success(self):
-        self.status_label.configure(text="Ticket submitted successfully!", style="Card.TLabel", foreground="#15803d")
+        if "id" in result:
+            track_new_ticket(result["id"], result.get("number", "?"), subject)
+        return result
+
+    def _submit_success(self, result=None):
+        if result and result.get("queued"):
+            self.status_label.configure(
+                text="No connection right now - your ticket was saved and will be "
+                     "submitted automatically once you're back online.",
+                style="Card.TLabel", foreground="#b45309",
+            )
+        else:
+            self.status_label.configure(text="Ticket submitted successfully!", style="Card.TLabel", foreground="#15803d")
         self.window.update()
-        self.window.after(1500, self._close)
+        self.window.after(1800, self._close)
 
     def _submit_error(self, message):
         self.submit_btn.configure(state="normal", text="Submit Ticket")
@@ -361,6 +802,101 @@ class TicketWindow:
         if self.window is not None:
             self.window.destroy()
             self.window = None
+        self.screenshot_bytes = None
+        self.attached_file_path = None
+
+
+# ── Recent tickets window ───────────────────────────────────────────────────
+
+class RecentTicketsWindow:
+    """Shows the most recent tickets for this client/contact."""
+
+    def __init__(self, root, config):
+        self.root = root
+        self.config = config
+        self.window = None
+        self.tree = None
+        self.status_label = None
+
+    def show(self):
+        if self.window is not None and self.window.winfo_exists():
+            self.window.deiconify()
+            self.window.lift()
+            self.window.focus_force()
+            self.refresh()
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"{APP_NAME} - My Recent Tickets")
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        self.window = win
+
+        outer = ttk.Frame(win, padding=16, style="TFrame")
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text="My Recent Tickets", style="Title.TLabel").pack(anchor="w", pady=(0, 10))
+
+        columns = ("number", "subject", "status", "created")
+        self.tree = ttk.Treeview(outer, columns=columns, show="headings", height=10)
+        self.tree.heading("number", text="#")
+        self.tree.heading("subject", text="Subject")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("created", text="Created")
+        self.tree.column("number", width=60, anchor="center")
+        self.tree.column("subject", width=280)
+        self.tree.column("status", width=110, anchor="center")
+        self.tree.column("created", width=140, anchor="center")
+        self.tree.pack(fill="both", expand=True)
+
+        self.status_label = ttk.Label(outer, text="Loading...", style="Muted.TLabel")
+        self.status_label.pack(anchor="w", pady=(8, 0))
+
+        win.update_idletasks()
+        w, h = 640, 380
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+
+        self.refresh()
+
+    def refresh(self):
+        self.status_label.configure(text="Loading...")
+        threading.Thread(target=self._fetch, daemon=True).start()
+
+    def _fetch(self):
+        cfg = self.config
+        base_url = cfg["itflow_base_url"].rstrip("/")
+        params = {
+            "api_key": cfg["api_key"],
+            "status": "all",
+            "limit": 15,
+            "client_id": cfg["client_id"],
+        }
+        if cfg.get("contact_id"):
+            params["contact_id"] = cfg["contact_id"]
+
+        try:
+            resp = requests.get(f"{base_url}/api/v1/tickets", params=params, timeout=20)
+            resp.raise_for_status()
+            tickets = resp.json().get("data", [])
+        except Exception as exc:
+            self.root.after(0, self._show_error, str(exc))
+            return
+
+        self.root.after(0, self._populate, tickets)
+
+    def _populate(self, tickets):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        for t in tickets:
+            self.tree.insert("", "end", values=(
+                t.get("number"), t.get("subject"), t.get("status"), (t.get("created_at") or "")[:16],
+            ))
+        self.status_label.configure(text=f"{len(tickets)} ticket(s)" if tickets else "No tickets found.")
+
+    def _show_error(self, message):
+        self.status_label.configure(text=f"Couldn't load tickets: {message}")
 
 
 def run_app(config_paths, icon_path=None):
@@ -382,25 +918,109 @@ def run_app(config_paths, icon_path=None):
 
     root = tk.Tk()
     root.withdraw()  # hidden root, used only to host Toplevel windows
-    setup_style(root)
+    setup_style(root, accent=config.get("accent_color"))
+
+    tray_image = build_tray_icon_image(icon_path, branding_logo=config.get("branding_logo"))
 
     ticket_window = TicketWindow(root, config, icon_path=icon_path)
+    recent_window = RecentTicketsWindow(root, config)
+
+    # Load ticket categories in the background so the dropdown is ready
+    # by the time the user opens the New Ticket window.
+    def load_categories():
+        try:
+            base_url = config["itflow_base_url"].rstrip("/")
+            resp = requests.get(
+                f"{base_url}/api/v1/ticket-categories",
+                params={"api_key": config["api_key"]}, timeout=15,
+            )
+            resp.raise_for_status()
+            ticket_window.categories = resp.json() or []
+        except Exception:
+            pass
+    threading.Thread(target=load_categories, daemon=True).start()
 
     def open_window(icon=None, item=None):
         root.after(0, ticket_window.show)
+
+    def open_recent(icon=None, item=None):
+        root.after(0, recent_window.show)
 
     def quit_app(icon, item):
         icon.stop()
         root.after(0, root.quit)
 
+    def do_public_ip(icon=None, item=None):
+        run_quick_tool(root, "Public IP Address", tool_public_ip)
+
+    def do_ping(icon=None, item=None):
+        run_quick_tool(root, "Ping Google", tool_ping)
+
+    def do_printers(icon=None, item=None):
+        run_quick_tool(root, "Installed Printers", tool_list_printers)
+
+    def do_spooler(icon=None, item=None):
+        run_quick_tool(root, "Restart Print Service", tool_restart_spooler)
+
+    def do_check_update(icon=None, item=None):
+        def worker():
+            result = check_for_update()
+            if result:
+                tag, url = result
+                def ask():
+                    if messagebox.askyesno(APP_NAME, f"A new version (v{tag}) is available. Open the download page?"):
+                        webbrowser.open(url)
+                root.after(0, ask)
+            else:
+                root.after(0, lambda: messagebox.showinfo(APP_NAME, f"You're up to date (v{VERSION})."))
+        threading.Thread(target=worker, daemon=True).start()
+
+    quick_tools_menu = pystray.Menu(
+        pystray.MenuItem("My Public IP", do_public_ip),
+        pystray.MenuItem("Ping Google", do_ping),
+        pystray.MenuItem("List Printers", do_printers),
+        pystray.MenuItem("Restart Print Service", do_spooler),
+    )
+
     menu = pystray.Menu(
         pystray.MenuItem("New Ticket", open_window, default=True),
+        pystray.MenuItem("My Recent Tickets", open_recent),
+        pystray.MenuItem("Quick Tools", quick_tools_menu),
+        pystray.MenuItem("Check for Updates", do_check_update),
         pystray.MenuItem("Exit", quit_app),
     )
 
-    icon = pystray.Icon(APP_NAME, build_tray_icon_image(icon_path), APP_NAME, menu)
+    icon = pystray.Icon(APP_NAME, tray_image, APP_NAME, menu)
 
     tray_thread = threading.Thread(target=icon.run, daemon=True)
     tray_thread.start()
+
+    # Background loop: retry queued (offline) tickets and poll for status
+    # changes on tickets this device has submitted.
+    def background_loop():
+        time.sleep(5)
+        while True:
+            try:
+                flush_queue(config)
+            except Exception:
+                pass
+            try:
+                poll_ticket_updates(config, icon)
+            except Exception:
+                pass
+            time.sleep(300)
+    threading.Thread(target=background_loop, daemon=True).start()
+
+    # Silent startup update check
+    if config.get("check_for_updates", True):
+        def startup_check():
+            result = check_for_update()
+            if result:
+                tag, _url = result
+                try:
+                    icon.notify(f"ITFlow Quick Ticket v{tag} is available.", title=APP_NAME)
+                except Exception:
+                    pass
+        threading.Thread(target=startup_check, daemon=True).start()
 
     root.mainloop()

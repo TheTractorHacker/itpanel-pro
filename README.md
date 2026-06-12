@@ -1,10 +1,27 @@
 # ITFlow Quick Ticket
 
 A lightweight tray/menu bar app that lets end users submit an ITFlow support
-ticket — with an optional screenshot — in a few clicks, with no portal
-login. Intended for mass deployment via RMM, with all connection settings
-(ITFlow URL, API key, client ID, etc.) configured at install time so the
-end user never sees credentials.
+ticket — with an optional screenshot or file attachment — in a few clicks,
+with no portal login. Intended for mass deployment via RMM, with all
+connection settings (ITFlow URL, API key, client ID, etc.) configured at
+install time so the end user never sees credentials.
+
+## Features
+
+- New Ticket window with subject, description, screenshot, and file
+  attachment
+- Auto-attaches system info (hostname, OS, user, local IP) to help
+  diagnose issues faster
+- Auto-links the ticket to the matching asset in ITFlow by hostname
+- Ticket category dropdown (when configured in ITFlow)
+- Offline queue — tickets submitted while offline are sent automatically
+  once connectivity returns
+- "My Recent Tickets" tray menu view
+- Desktop notifications when a submitted ticket's status changes
+- Silent auto-update check against GitHub releases
+- Per-MSP branding (accent color + logo)
+- "Quick Tools" troubleshooting menu: public IP, ping google.com, list
+  printers, restart print spooler/CUPS
 
 ## Platforms
 

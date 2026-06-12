@@ -55,7 +55,7 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'ITFlow Quick Ticket',
         'CFBundleDisplayName': 'ITFlow Quick Ticket',
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleShortVersionString': '1.4.0',
         'LSUIElement': True,  # menu-bar app, no Dock icon
         'NSHighResolutionCapable': True,
     },

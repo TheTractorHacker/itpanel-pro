@@ -68,10 +68,19 @@ and — if you omit the connection-setting arguments — keeps the existing
 
 Same fields as the [Windows app](../Windows/README.md#config-reference-configjson):
 `itflow_base_url`, `api_key`, `client_id`, `contact_id` (optional, or
-`null`), `priority`.
+`null`), `priority`, plus the optional `include_system_info`,
+`check_for_updates`, `accent_color`, and `branding_logo` fields.
 
 Config is read from, in order:
 
 1. `/etc/itflow-quick-ticket/config.json` (system-wide, written by `install.sh`)
 2. `~/.config/itflow-quick-ticket/config.json` (per-user override)
 3. `config.json` next to the binary
+
+## Quick Tools notes
+
+The tray menu's "Restart Print Service" tool runs `systemctl restart cups`.
+Since the tray app runs as a normal user, this will normally fail with a
+permissions error unless polkit/sudo is configured to allow it — the other
+Quick Tools (public IP, ping, list printers via `lpstat`) work without
+elevated privileges.

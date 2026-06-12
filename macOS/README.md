@@ -71,7 +71,8 @@ xattr -dr com.apple.quarantine /Applications/ITFlowQuickTicket.app
 
 Same fields as the [Windows app](../Windows/README.md#config-reference-configjson):
 `itflow_base_url`, `api_key`, `client_id`, `contact_id` (optional, or
-`null`), `priority`.
+`null`), `priority`, plus the optional `include_system_info`,
+`check_for_updates`, `accent_color`, and `branding_logo` fields.
 
 Config is read from, in order:
 
@@ -80,3 +81,11 @@ Config is read from, in order:
 2. `~/Library/Application Support/ITFlowQuickTicket/config.json` (per-user
    override)
 3. `config.json` next to the app bundle
+
+## Quick Tools notes
+
+The tray menu's "Restart Print Service" tool runs
+`launchctl stop/start org.cups.cupsd`, which normally requires root —
+since the app runs in the user's menu bar this will usually show a
+permissions error. The other Quick Tools (public IP, ping, list printers
+via `lpstat`) work without elevated privileges.
