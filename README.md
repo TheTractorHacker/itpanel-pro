@@ -16,9 +16,10 @@ end user never sees credentials.
 
 ## Requirements
 
-Requires **ITFlow v2.11.32 or later** — this is the version that added
-multipart/form-data attachment support to `POST /api/v1/tickets` (used to
-submit the optional screenshot alongside the ticket).
+Requires **[ITFlow MSP — From TheTractorHacker](https://github.com/TheTractorHacker/itflow) v2.11.32 or later** —
+this is the version that added multipart/form-data attachment support to
+`POST /api/v1/tickets` (used to submit the optional screenshot alongside the
+ticket).
 
 ## Repo layout
 
