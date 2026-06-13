@@ -33,7 +33,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.0.0"
+VERSION = "2.0.2"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
 
 ACCENT = "#2563eb"
@@ -1001,7 +1001,8 @@ def run_app(config_paths, icon_path=None):
             webbrowser.open(release.get("html_url"))
             return
         try:
-            dest = os.path.join(tempfile.gettempdir(), asset["name"])
+            tmp_dir = tempfile.mkdtemp(prefix="itpanelpro_update_")
+            dest = os.path.join(tmp_dir, asset["name"])
             with requests.get(asset["browser_download_url"], stream=True, timeout=60) as r:
                 r.raise_for_status()
                 with open(dest, "wb") as f:

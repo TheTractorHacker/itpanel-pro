@@ -17,7 +17,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITPanel Pro"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.0.2"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITPanelPro.exe"
 #define OldAppId "{B7B6A6E1-6E0C-4C2D-9F2F-7C1D4A9E3B21}"
@@ -289,7 +289,22 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  SrcDir: String;
+  ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
     WriteConfigFile;
+
+  if CurStep = ssDone then
+  begin
+    // If this installer was downloaded by the tray app's self-update (see
+    // do_self_update in common/core.py), it lives in its own temp folder
+    // named "itpanelpro_update_*". Clean that folder up now that the
+    // install is done, after a short delay so this exe can be removed.
+    SrcDir := ExtractFileDir(ExpandConstant('{srcexe}'));
+    if Pos('itpanelpro_update_', Lowercase(ExtractFileName(SrcDir))) = 1 then
+      Exec(ExpandConstant('{cmd}'), '/C ping -n 3 127.0.0.1 >nul & rmdir /s /q "' + SrcDir + '"',
+        '', SW_HIDE, ewNoWait, ResultCode);
+  end;
 end;
