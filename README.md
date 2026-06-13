@@ -23,7 +23,7 @@ install time so the end user never sees credentials.
   download-and-install update on Windows
 - Per-MSP branding (accent color + logo)
 - "Quick Tools" troubleshooting menu: public IP, ping google.com, list
-  printers, restart print spooler/CUPS
+  printers, restart print spooler/CUPS, open network adapter settings
 
 ## Platforms
 

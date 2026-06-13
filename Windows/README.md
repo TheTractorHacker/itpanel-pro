@@ -205,6 +205,7 @@ install (or templating it in your own deployment scripts).
 - **Status-change notifications** — a desktop notification is shown when a
   ticket submitted from this device changes status.
 - **Quick Tools** — tray menu submenu with one-click troubleshooting: show
-  this machine's public IP, ping google.com, list installed printers, and
+  this machine's public IP, ping google.com, list installed printers,
   restart the print spooler service (the last one may require running the
-  app as Administrator).
+  app as Administrator), and open the Network Connections (`ncpa.cpl`)
+  control panel.

@@ -320,6 +320,25 @@ def tool_restart_spooler():
     return restart_print_spooler()
 
 
+def open_network_adapters():
+    """Open the OS's network adapters/connections settings UI."""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            subprocess.Popen(["control.exe", "ncpa.cpl"])
+        elif system == "Darwin":
+            subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.network"])
+        else:
+            for cmd in (["nm-connection-editor"], ["gnome-control-center", "network"]):
+                try:
+                    subprocess.Popen(cmd)
+                    return
+                except FileNotFoundError:
+                    continue
+    except Exception:
+        pass
+
+
 def run_quick_tool(root, title, func):
     """Run a (possibly slow/blocking) tool function in a background thread
     and show its result in a message box on the Tk main thread."""
@@ -963,6 +982,9 @@ def run_app(config_paths, icon_path=None):
     def do_spooler(icon=None, item=None):
         run_quick_tool(root, "Restart Print Service", tool_restart_spooler)
 
+    def do_network_adapters(icon=None, item=None):
+        open_network_adapters()
+
     def do_open_portal(icon=None, item=None):
         base_url = config["itflow_base_url"].rstrip("/")
         webbrowser.open(f"{base_url}/client/")
@@ -1013,6 +1035,7 @@ def run_app(config_paths, icon_path=None):
         pystray.MenuItem("Ping Google", do_ping),
         pystray.MenuItem("List Printers", do_printers),
         pystray.MenuItem("Restart Print Service", do_spooler),
+        pystray.MenuItem("Network Adapters", do_network_adapters),
     )
 
     menu = pystray.Menu(
