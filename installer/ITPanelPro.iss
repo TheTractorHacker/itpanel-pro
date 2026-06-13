@@ -17,7 +17,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITPanel Pro"
-#define MyAppVersion "2.0.2"
+#define MyAppVersion "2.0.3"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITPanelPro.exe"
 #define OldAppId "{B7B6A6E1-6E0C-4C2D-9F2F-7C1D4A9E3B21}"
@@ -38,6 +38,9 @@ SetupIconFile=..\Windows\assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64
+; Give the wizard a bit more room so the connection-settings page (5 fields
+; plus description) doesn't get cut off.
+WizardSizePercent=110,130
 ; Re-running this installer (e.g. for an upgrade) closes the running tray
 ; app so its exe can be overwritten, and restarts it afterwards.
 CloseApplications=force
@@ -179,12 +182,8 @@ begin
   ConfigPage := CreateInputQueryPage(wpSelectDir,
     'ITFlow Connection Settings',
     'Configure this install to talk to your ITFlow instance',
-    'These values are saved to config.json and used by the tray app to ' +
-    'submit tickets. You can find the API key under Admin > API Keys, ' +
-    'and the Client ID on the client''s page in ITFlow.' + #13#10 + #13#10 +
-    'If ITPanel Pro (or ITFlow Quick Ticket) is already installed, the ' +
-    'existing settings below are pre-filled and will be kept unless you ' +
-    'change them.');
+    'API key: Admin > API Keys. Client ID: on the client''s page in ITFlow. ' +
+    'Existing settings are pre-filled and kept on upgrades unless changed.');
 
   ConfigPage.Add('ITFlow Base URL (e.g. https://itflow.example.com):', False);
   ConfigPage.Add('API Key:', False);
