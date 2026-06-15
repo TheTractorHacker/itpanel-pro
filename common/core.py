@@ -33,7 +33,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.0.4"
+VERSION = "2.1.0"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
 
 ACCENT = "#2563eb"
@@ -455,7 +455,7 @@ def save_tracked_tickets(tickets):
 
 def track_new_ticket(ticket_id, number, subject, status="New"):
     tickets = load_tracked_tickets()
-    tickets.append({"id": ticket_id, "number": number, "subject": subject, "status": status})
+    tickets.append({"id": ticket_id, "number": number, "subject": subject, "status": status, "last_chat_id": 0})
     save_tracked_tickets(tickets[-20:])
 
 
@@ -488,6 +488,54 @@ def poll_ticket_updates(config, icon):
                 changed = True
         except Exception:
             continue
+
+    if changed:
+        save_tracked_tickets(tickets)
+
+
+def poll_ticket_chat(config, icon):
+    """Check tracked tickets for new agent chat messages and notify."""
+    tickets = load_tracked_tickets()
+    if not tickets:
+        return
+
+    base_url = config["itflow_base_url"].rstrip("/")
+    changed = False
+    for t in tickets:
+        last_chat_id = t.get("last_chat_id", 0)
+        try:
+            resp = requests.get(
+                f"{base_url}/api/v1/tickets/{t['id']}/chat",
+                params={"api_key": config["api_key"], "since_id": last_chat_id},
+                timeout=15,
+            )
+            if resp.status_code == 403:
+                # Live chat module disabled on the server - nothing to do.
+                continue
+            resp.raise_for_status()
+            messages = resp.json().get("data", [])
+        except Exception:
+            continue
+
+        if not messages:
+            continue
+
+        agent_messages = [m for m in messages if m.get("sender_type") == "agent"]
+        if agent_messages:
+            try:
+                if len(agent_messages) == 1:
+                    body = agent_messages[0].get("message", "")
+                else:
+                    body = f"{len(agent_messages)} new messages"
+                icon.notify(
+                    f"Ticket #{t['number']}: {body}",
+                    title="ITFlow Live Chat",
+                )
+            except Exception:
+                pass
+
+        t["last_chat_id"] = messages[-1]["id"]
+        changed = True
 
     if changed:
         save_tracked_tickets(tickets)
@@ -831,12 +879,14 @@ class TicketWindow:
 class RecentTicketsWindow:
     """Shows the most recent tickets for this client/contact."""
 
-    def __init__(self, root, config):
+    def __init__(self, root, config, chat_window=None):
         self.root = root
         self.config = config
+        self.chat_window = chat_window
         self.window = None
         self.tree = None
         self.status_label = None
+        self.tickets_by_id = {}
 
     def show(self):
         if self.window is not None and self.window.winfo_exists():
@@ -869,8 +919,9 @@ class RecentTicketsWindow:
         self.tree.column("status", width=110, anchor="center")
         self.tree.column("created", width=140, anchor="center")
         self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", self._on_double_click)
 
-        self.status_label = ttk.Label(outer, text="Loading...", style="Muted.TLabel")
+        self.status_label = ttk.Label(outer, text="Loading... (double-click a ticket to open live chat)", style="Muted.TLabel")
         self.status_label.pack(anchor="w", pady=(8, 0))
 
         win.update_idletasks()
@@ -909,14 +960,201 @@ class RecentTicketsWindow:
     def _populate(self, tickets):
         for row in self.tree.get_children():
             self.tree.delete(row)
+        self.tickets_by_id = {}
         for t in tickets:
-            self.tree.insert("", "end", values=(
+            ticket_id = t.get("id")
+            self.tickets_by_id[str(ticket_id)] = t
+            self.tree.insert("", "end", iid=str(ticket_id), values=(
                 t.get("number"), t.get("subject"), t.get("status"), (t.get("created_at") or "")[:16],
             ))
-        self.status_label.configure(text=f"{len(tickets)} ticket(s)" if tickets else "No tickets found.")
+        self.status_label.configure(
+            text=(f"{len(tickets)} ticket(s) - double-click a ticket to open live chat" if tickets else "No tickets found.")
+        )
 
     def _show_error(self, message):
         self.status_label.configure(text=f"Couldn't load tickets: {message}")
+
+    def _on_double_click(self, event=None):
+        item_id = self.tree.focus()
+        if not item_id or not self.chat_window:
+            return
+        ticket = self.tickets_by_id.get(item_id)
+        if not ticket:
+            return
+        self.chat_window.show(int(item_id), ticket.get("number"), ticket.get("subject"))
+
+
+class TicketChatWindow:
+    """Live chat window for a single ticket. One instance reused per open."""
+
+    POLL_INTERVAL_MS = 15000
+
+    def __init__(self, root, config):
+        self.root = root
+        self.config = config
+        self.window = None
+        self.text = None
+        self.entry = None
+        self.send_btn = None
+        self.ticket_id = None
+        self.ticket_number = None
+        self.last_id = 0
+        self._poll_job = None
+
+    def show(self, ticket_id, ticket_number, ticket_subject):
+        self.ticket_id = ticket_id
+        self.ticket_number = ticket_number
+        self.last_id = 0
+
+        if self.window is not None and self.window.winfo_exists():
+            self.window.deiconify()
+            self.window.lift()
+            self.window.focus_force()
+        else:
+            win = tk.Toplevel(self.root)
+            win.configure(bg=BG)
+            win.attributes("-topmost", True)
+            win.protocol("WM_DELETE_WINDOW", self._on_close)
+            self.window = win
+
+            outer = ttk.Frame(win, padding=16, style="TFrame")
+            outer.pack(fill="both", expand=True)
+
+            self.title_label = ttk.Label(outer, text="", style="Title.TLabel")
+            self.title_label.pack(anchor="w", pady=(0, 10))
+
+            text_frame = tk.Frame(outer, bg=BORDER, padx=1, pady=1)
+            text_frame.pack(fill="both", expand=True, pady=(0, 10))
+            self.text = tk.Text(
+                text_frame,
+                width=60,
+                height=16,
+                relief="flat",
+                bg=CARD_BG,
+                fg="#1f2533",
+                font=("Segoe UI", 10),
+                padx=8,
+                pady=8,
+                wrap="word",
+                state="disabled",
+            )
+            self.text.pack(fill="both", expand=True)
+
+            entry_row = ttk.Frame(outer, style="TFrame")
+            entry_row.pack(fill="x")
+            self.entry = ttk.Entry(entry_row)
+            self.entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            self.entry.bind("<Return>", lambda event: self.send())
+            self.send_btn = ttk.Button(entry_row, text="Send", style="Accent.TButton", command=self.send)
+            self.send_btn.pack(side="right")
+
+            win.update_idletasks()
+            w, h = 480, 420
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+
+        self.title_label.configure(text=f"Live Chat - Ticket #{ticket_number}: {ticket_subject}")
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("end", "Loading messages...\n")
+        self.text.configure(state="disabled")
+
+        self._load_history()
+        self._schedule_poll()
+        self.entry.focus_set()
+
+    def _on_close(self):
+        if self._poll_job:
+            self.root.after_cancel(self._poll_job)
+            self._poll_job = None
+        self.window.withdraw()
+
+    def _schedule_poll(self):
+        if self._poll_job:
+            self.root.after_cancel(self._poll_job)
+        self._poll_job = self.root.after(self.POLL_INTERVAL_MS, self._poll)
+
+    def _poll(self):
+        threading.Thread(target=self._fetch_messages, args=(self.ticket_id, self.last_id), daemon=True).start()
+        self._schedule_poll()
+
+    def _load_history(self):
+        threading.Thread(target=self._fetch_messages, args=(self.ticket_id, 0), daemon=True).start()
+
+    def _fetch_messages(self, ticket_id, since_id):
+        cfg = self.config
+        base_url = cfg["itflow_base_url"].rstrip("/")
+        try:
+            resp = requests.get(
+                f"{base_url}/api/v1/tickets/{ticket_id}/chat",
+                params={"api_key": cfg["api_key"], "since_id": since_id},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            messages = resp.json().get("data", [])
+        except Exception as exc:
+            if ticket_id == self.ticket_id and since_id == 0:
+                self.root.after(0, self._show_error, str(exc))
+            return
+
+        if ticket_id != self.ticket_id:
+            return
+
+        self.root.after(0, self._append_messages, messages, since_id == 0)
+
+    def _append_messages(self, messages, replace):
+        if not messages and not replace:
+            return
+
+        self.text.configure(state="normal")
+        if replace:
+            self.text.delete("1.0", "end")
+            if not messages:
+                self.text.insert("end", "No messages yet. Say hello!\n")
+
+        for m in messages:
+            sender = m.get("sender_name") or ("Agent" if m.get("sender_type") == "agent" else "You")
+            timestamp = (m.get("created_at") or "")[:16]
+            self.text.insert("end", f"{sender} ({timestamp}):\n{m.get('message', '')}\n\n")
+            self.last_id = max(self.last_id, m.get("id", 0))
+
+        self.text.configure(state="disabled")
+        self.text.see("end")
+
+    def _show_error(self, message):
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("end", f"Couldn't load chat: {message}\n")
+        self.text.configure(state="disabled")
+
+    def send(self):
+        message = self.entry.get().strip()
+        if not message or not self.ticket_id:
+            return
+        self.entry.delete(0, "end")
+        threading.Thread(target=self._send_message, args=(self.ticket_id, message), daemon=True).start()
+
+    def _send_message(self, ticket_id, message):
+        cfg = self.config
+        base_url = cfg["itflow_base_url"].rstrip("/")
+        body = {"message": message}
+        if cfg.get("contact_id"):
+            body["contact_id"] = cfg["contact_id"]
+        try:
+            resp = requests.post(
+                f"{base_url}/api/v1/tickets/{ticket_id}/chat",
+                params={"api_key": cfg["api_key"]},
+                json=body,
+                timeout=15,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            if ticket_id == self.ticket_id:
+                self.root.after(0, lambda: messagebox.showerror(APP_NAME, f"Couldn't send message: {exc}"))
+            return
+
+        if ticket_id == self.ticket_id:
+            self.root.after(0, self._poll)
 
 
 def run_app(config_paths, icon_path=None):
@@ -943,7 +1181,8 @@ def run_app(config_paths, icon_path=None):
     tray_image = build_tray_icon_image(icon_path, branding_logo=config.get("branding_logo"))
 
     ticket_window = TicketWindow(root, config, icon_path=icon_path)
-    recent_window = RecentTicketsWindow(root, config)
+    chat_window = TicketChatWindow(root, config)
+    recent_window = RecentTicketsWindow(root, config, chat_window=chat_window)
 
     # Load ticket categories in the background so the dropdown is ready
     # by the time the user opens the New Ticket window.
@@ -1064,6 +1303,10 @@ def run_app(config_paths, icon_path=None):
                 pass
             try:
                 poll_ticket_updates(config, icon)
+            except Exception:
+                pass
+            try:
+                poll_ticket_chat(config, icon)
             except Exception:
                 pass
             time.sleep(300)
