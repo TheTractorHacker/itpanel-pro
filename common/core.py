@@ -33,7 +33,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
 
 ACCENT = "#2563eb"
@@ -457,6 +457,12 @@ def track_new_ticket(ticket_id, number, subject, status="New"):
     tickets = load_tracked_tickets()
     tickets.append({"id": ticket_id, "number": number, "subject": subject, "status": status, "last_chat_id": 0})
     save_tracked_tickets(tickets[-20:])
+    # Start an instant chat listener for this ticket right away, instead of
+    # waiting for the next background_loop reconciliation pass.
+    try:
+        _ensure_chat_listeners()
+    except Exception:
+        pass
 
 
 def poll_ticket_updates(config, icon):
@@ -539,6 +545,117 @@ def poll_ticket_chat(config, icon):
 
     if changed:
         save_tracked_tickets(tickets)
+
+
+# ── Live chat (SSE) ──────────────────────────────────────────────────────
+#
+# poll_ticket_chat() above is a 300s safety-net fallback. The functions below
+# subscribe to the same server-sent-events stream the web UI uses (backed by
+# Redis pub/sub - see includes/sse_ticket_chat_stream.php) so new messages
+# arrive within ~1-2 seconds instead of waiting for the next poll.
+
+def _sse_chat_listen(config, ticket_id, on_message, stop_event):
+    """Reconnecting SSE listener for one ticket's live chat channel.
+
+    Calls on_message(event_dict) for every "chat" event received. Runs until
+    stop_event is set. The server intentionally closes the connection every
+    ~60s (see sse_ticket_chat_stream.php's $max_runtime) so a short pause and
+    reconnect on any disconnect is the expected steady state, not an error.
+    """
+    base_url = config["itflow_base_url"].rstrip("/")
+    url = f"{base_url}/api/v1/tickets/{ticket_id}/chat"
+    params = {"api_key": config["api_key"], "stream": 1}
+
+    while not stop_event.is_set():
+        try:
+            resp = requests.get(url, params=params, stream=True, timeout=(10, 75))
+            if resp.status_code == 403:
+                # Live chat module disabled server-side - no point retrying.
+                return
+            if resp.status_code != 200:
+                stop_event.wait(15)
+                continue
+
+            event_name = None
+            for line in resp.iter_lines(decode_unicode=True):
+                if stop_event.is_set():
+                    return
+                if line is None or line == "":
+                    event_name = None
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[len("event:"):].strip()
+                elif line.startswith("data:") and event_name == "chat":
+                    try:
+                        on_message(json.loads(line[len("data:"):].strip()))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        stop_event.wait(2)
+
+
+_chat_listeners = {}  # ticket_id -> threading.Event (set to stop)
+_chat_listener_config = None
+_chat_listener_icon = None
+
+
+def _on_chat_event(icon, tracked_ticket, data):
+    if data.get("sender_type") == "agent":
+        try:
+            icon.notify(
+                f"Ticket #{tracked_ticket['number']}: {data.get('message', '')}",
+                title="ITFlow Live Chat",
+            )
+        except Exception:
+            pass
+
+    # Keep last_chat_id in sync so the poll_ticket_chat() fallback doesn't
+    # re-notify for messages already delivered live.
+    chat_id = data.get("chat_id", 0)
+    if not chat_id:
+        return
+    tickets = load_tracked_tickets()
+    changed = False
+    for t in tickets:
+        if t["id"] == tracked_ticket["id"] and chat_id > t.get("last_chat_id", 0):
+            t["last_chat_id"] = chat_id
+            changed = True
+    if changed:
+        save_tracked_tickets(tickets)
+
+
+def _ensure_chat_listeners():
+    """Start an SSE listener thread for every tracked ticket that doesn't
+    already have one, and stop listeners for tickets no longer tracked.
+
+    Safe to call repeatedly (from the background loop, and immediately after
+    track_new_ticket()) - it's a no-op for tickets already covered.
+    """
+    config = _chat_listener_config
+    icon = _chat_listener_icon
+    if not config or not icon:
+        return
+
+    tickets = load_tracked_tickets()
+    tracked_ids = {t["id"] for t in tickets}
+
+    for ticket_id in list(_chat_listeners):
+        if ticket_id not in tracked_ids:
+            _chat_listeners.pop(ticket_id).set()
+
+    for t in tickets:
+        ticket_id = t["id"]
+        if ticket_id in _chat_listeners:
+            continue
+        stop_event = threading.Event()
+        threading.Thread(
+            target=_sse_chat_listen,
+            args=(config, ticket_id, lambda data, t=t: _on_chat_event(icon, t, data), stop_event),
+            daemon=True,
+        ).start()
+        _chat_listeners[ticket_id] = stop_event
 
 
 # ── Update check ─────────────────────────────────────────────────────────
@@ -1000,11 +1117,15 @@ class TicketChatWindow:
         self.ticket_number = None
         self.last_id = 0
         self._poll_job = None
+        self._sse_stop_event = None
+        self._seen_ids = set()
 
     def show(self, ticket_id, ticket_number, ticket_subject):
+        self._stop_sse()
         self.ticket_id = ticket_id
         self.ticket_number = ticket_number
         self.last_id = 0
+        self._seen_ids = set()
 
         if self.window is not None and self.window.winfo_exists():
             self.window.deiconify()
@@ -1061,13 +1182,39 @@ class TicketChatWindow:
 
         self._load_history()
         self._schedule_poll()
+        self._start_sse()
         self.entry.focus_set()
 
     def _on_close(self):
         if self._poll_job:
             self.root.after_cancel(self._poll_job)
             self._poll_job = None
+        self._stop_sse()
         self.window.withdraw()
+
+    def _start_sse(self):
+        self._sse_stop_event = threading.Event()
+        threading.Thread(
+            target=_sse_chat_listen,
+            args=(self.config, self.ticket_id, self._on_sse_message, self._sse_stop_event),
+            daemon=True,
+        ).start()
+
+    def _stop_sse(self):
+        if self._sse_stop_event:
+            self._sse_stop_event.set()
+            self._sse_stop_event = None
+
+    def _on_sse_message(self, data):
+        message = {
+            "id": data.get("chat_id"),
+            "sender_type": data.get("sender_type"),
+            "sender_id": data.get("sender_id"),
+            "sender_name": data.get("sender_name"),
+            "message": data.get("message"),
+            "created_at": data.get("created_at"),
+        }
+        self.root.after(0, self._append_messages, [message], False)
 
     def _schedule_poll(self):
         if self._poll_job:
@@ -1109,14 +1256,22 @@ class TicketChatWindow:
         self.text.configure(state="normal")
         if replace:
             self.text.delete("1.0", "end")
+            self._seen_ids = set()
             if not messages:
                 self.text.insert("end", "No messages yet. Say hello!\n")
 
         for m in messages:
+            mid = m.get("id")
+            if mid and mid in self._seen_ids:
+                # Already shown - the periodic poll and the SSE listener can
+                # both deliver the same message.
+                continue
+            if mid:
+                self._seen_ids.add(mid)
             sender = m.get("sender_name") or ("Agent" if m.get("sender_type") == "agent" else "You")
             timestamp = (m.get("created_at") or "")[:16]
             self.text.insert("end", f"{sender} ({timestamp}):\n{m.get('message', '')}\n\n")
-            self.last_id = max(self.last_id, m.get("id", 0))
+            self.last_id = max(self.last_id, mid or 0)
 
         self.text.configure(state="disabled")
         self.text.see("end")
@@ -1289,13 +1444,19 @@ def run_app(config_paths, icon_path=None):
 
     icon = pystray.Icon(APP_NAME, tray_image, APP_NAME, menu)
 
+    global _chat_listener_config, _chat_listener_icon
+    _chat_listener_config = config
+    _chat_listener_icon = icon
+
     tray_thread = threading.Thread(target=icon.run, daemon=True)
     tray_thread.start()
 
-    # Background loop: retry queued (offline) tickets and poll for status
-    # changes on tickets this device has submitted.
+    # Background loop: retry queued (offline) tickets, poll for status
+    # changes, and keep one live-chat SSE listener running per tracked
+    # ticket (poll_ticket_chat is a 300s fallback in case Redis/SSE is down).
     def background_loop():
         time.sleep(5)
+        _ensure_chat_listeners()
         while True:
             try:
                 flush_queue(config)
@@ -1307,6 +1468,10 @@ def run_app(config_paths, icon_path=None):
                 pass
             try:
                 poll_ticket_chat(config, icon)
+            except Exception:
+                pass
+            try:
+                _ensure_chat_listeners()
             except Exception:
                 pass
             time.sleep(300)
