@@ -17,14 +17,17 @@ import io
 import json
 import os
 import platform
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
 import webbrowser
+import zipfile
 
 import requests
 from PIL import Image, ImageDraw, ImageGrab, ImageTk
@@ -33,7 +36,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
 
 ACCENT = "#2563eb"
@@ -1383,26 +1386,83 @@ def run_app(config_paths, icon_path=None):
         base_url = config["itflow_base_url"].rstrip("/")
         webbrowser.open(f"{base_url}/client/")
 
+    def _download_asset(url, dest):
+        with requests.get(url, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
     def do_self_update(tag, release):
-        """Download the new installer and run it silently. Inno Setup's
-        CloseApplications=force/RestartApplications=yes will close this
-        process and relaunch the updated app once the install finishes."""
-        asset = next(
-            (a for a in release.get("assets", []) if a["name"].lower().endswith("setup.exe")),
-            None,
-        )
-        if not asset:
-            webbrowser.open(release.get("html_url"))
-            return
+        """Download and install the update for the current platform without opening a browser."""
+        system = platform.system()
+        assets = release.get("assets", [])
+        try:
+            icon.notify(f"Downloading v{tag} update...", title=APP_NAME)
+        except Exception:
+            pass
         try:
             tmp_dir = tempfile.mkdtemp(prefix="itpanelpro_update_")
-            dest = os.path.join(tmp_dir, asset["name"])
-            with requests.get(asset["browser_download_url"], stream=True, timeout=60) as r:
-                r.raise_for_status()
-                with open(dest, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-            subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+
+            if system == "Windows":
+                # Silent Inno Setup install — CloseApplications=force restarts the app
+                asset = next((a for a in assets if a["name"].lower().endswith("setup.exe")), None)
+                if not asset:
+                    root.after(0, lambda: messagebox.showerror(APP_NAME, "Windows installer not found in release."))
+                    return
+                dest = os.path.join(tmp_dir, asset["name"])
+                _download_asset(asset["browser_download_url"], dest)
+                subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+
+            elif system == "Darwin":
+                # Download zip, extract, run install.sh via osascript (prompts admin password once)
+                asset = next((a for a in assets if a["name"].lower().endswith("-macos.zip")), None)
+                if not asset:
+                    root.after(0, lambda: messagebox.showerror(APP_NAME, "macOS update package not found in release."))
+                    return
+                dest = os.path.join(tmp_dir, asset["name"])
+                _download_asset(asset["browser_download_url"], dest)
+                with zipfile.ZipFile(dest, "r") as z:
+                    z.extractall(tmp_dir)
+                install_sh = os.path.join(tmp_dir, "install.sh")
+                if os.path.exists(install_sh):
+                    os.chmod(install_sh, 0o755)
+                    script = f'do shell script "bash {shlex.quote(install_sh)}" with administrator privileges'
+                    subprocess.Popen(["osascript", "-e", script])
+                    root.after(0, lambda: messagebox.showinfo(APP_NAME,
+                        f"Installing v{tag}...\n\nRestart ITPanel Pro to complete the update."))
+                else:
+                    subprocess.Popen(["open", tmp_dir])
+                    root.after(0, lambda: messagebox.showinfo(APP_NAME,
+                        f"Downloaded to:\n{tmp_dir}\n\nDrag ITPanelPro.app to Applications to update."))
+
+            else:
+                # Linux: download tar.gz, extract, run install.sh via pkexec (polkit GUI auth)
+                asset = next((a for a in assets if a["name"].lower().endswith("-linux.tar.gz")), None)
+                if not asset:
+                    root.after(0, lambda: messagebox.showerror(APP_NAME, "Linux update package not found in release."))
+                    return
+                dest = os.path.join(tmp_dir, asset["name"])
+                _download_asset(asset["browser_download_url"], dest)
+                with tarfile.open(dest, "r:gz") as t:
+                    t.extractall(tmp_dir)
+                install_sh = os.path.join(tmp_dir, "install.sh")
+                if os.path.exists(install_sh):
+                    os.chmod(install_sh, 0o755)
+                    has_pkexec = subprocess.run(["which", "pkexec"], capture_output=True).returncode == 0
+                    if has_pkexec:
+                        subprocess.Popen(["pkexec", "bash", install_sh])
+                        root.after(0, lambda: messagebox.showinfo(APP_NAME,
+                            f"Installing v{tag}...\n\nRestart ITPanel Pro to complete the update."))
+                    else:
+                        subprocess.Popen(["xdg-open", tmp_dir])
+                        root.after(0, lambda: messagebox.showinfo(APP_NAME,
+                            f"Downloaded to:\n{tmp_dir}\n\nRun install.sh as root to complete."))
+                else:
+                    subprocess.Popen(["xdg-open", tmp_dir])
+                    root.after(0, lambda: messagebox.showinfo(APP_NAME,
+                        f"Downloaded to:\n{tmp_dir}\n\nRun install.sh as root to complete."))
+
         except Exception as exc:
             root.after(0, lambda: messagebox.showerror(APP_NAME, f"Update failed: {exc}"))
 
@@ -1413,16 +1473,10 @@ def run_app(config_paths, icon_path=None):
                 root.after(0, lambda: messagebox.showinfo(APP_NAME, f"You're up to date (v{VERSION})."))
                 return
             tag, release = result
-            if platform.system() == "Windows":
-                def ask():
-                    if messagebox.askyesno(APP_NAME, f"A new version (v{tag}) is available. Update and restart now?"):
-                        threading.Thread(target=do_self_update, args=(tag, release), daemon=True).start()
-                root.after(0, ask)
-            else:
-                def ask():
-                    if messagebox.askyesno(APP_NAME, f"A new version (v{tag}) is available. Open the download page?"):
-                        webbrowser.open(release.get("html_url"))
-                root.after(0, ask)
+            def ask():
+                if messagebox.askyesno(APP_NAME, f"A new version ({tag}) is available. Download and install now?"):
+                    threading.Thread(target=do_self_update, args=(tag, release), daemon=True).start()
+            root.after(0, ask)
         threading.Thread(target=worker, daemon=True).start()
 
     quick_tools_menu = pystray.Menu(
@@ -1481,10 +1535,15 @@ def run_app(config_paths, icon_path=None):
     if config.get("check_for_updates", True):
         def startup_check():
             result = check_for_update()
-            if result:
-                tag, _release = result
+            if not result:
+                return
+            tag, release = result
+            if platform.system() == "Windows":
+                # Auto-install silently on Windows — Inno Setup handles closing and restarting
+                do_self_update(tag, release)
+            else:
                 try:
-                    icon.notify(f"{APP_NAME} v{tag} is available.", title=APP_NAME)
+                    icon.notify(f"{APP_NAME} v{tag} available — use Check for Updates to install.", title=APP_NAME)
                 except Exception:
                     pass
         threading.Thread(target=startup_check, daemon=True).start()
