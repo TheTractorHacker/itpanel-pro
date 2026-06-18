@@ -17,7 +17,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITPanel Pro"
-#define MyAppVersion "2.1.2"
+#define MyAppVersion "2.1.3"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITPanelPro.exe"
 #define OldAppId "{B7B6A6E1-6E0C-4C2D-9F2F-7C1D4A9E3B21}"

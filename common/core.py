@@ -36,7 +36,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.1.2"
+VERSION = "2.1.3"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
 
 ACCENT = "#2563eb"
@@ -1394,18 +1394,28 @@ def run_app(config_paths, icon_path=None):
                     f.write(chunk)
 
     def do_self_update(tag, release):
-        """Download and install the update for the current platform without opening a browser."""
+        """Download and silently install the update for the current platform.
+
+        Windows: Inno Setup silent install — CloseApplications=force handles
+        closing this process and relaunching the updated app automatically.
+
+        macOS / Linux: a detached shell script waits for this process to exit,
+        replaces the binary/app bundle in-place (tries direct write first, falls
+        back to sudo with cached credentials from the RMM tool), then relaunches.
+        No password prompts, no browser, no dialogs.
+        """
         system = platform.system()
         assets = release.get("assets", [])
+
         try:
             icon.notify(f"Downloading v{tag} update...", title=APP_NAME)
         except Exception:
             pass
+
         try:
             tmp_dir = tempfile.mkdtemp(prefix="itpanelpro_update_")
 
             if system == "Windows":
-                # Silent Inno Setup install — CloseApplications=force restarts the app
                 asset = next((a for a in assets if a["name"].lower().endswith("setup.exe")), None)
                 if not asset:
                     root.after(0, lambda: messagebox.showerror(APP_NAME, "Windows installer not found in release."))
@@ -1414,54 +1424,87 @@ def run_app(config_paths, icon_path=None):
                 _download_asset(asset["browser_download_url"], dest)
                 subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
 
-            elif system == "Darwin":
-                # Download zip, extract, run install.sh via osascript (prompts admin password once)
+            elif system == "Darwin" and getattr(sys, "frozen", False):
+                # Derive the .app bundle path from the running executable:
+                # .app/Contents/MacOS/ITPanelPro  ->  up three levels  -> .app
+                app_bundle = os.path.normpath(
+                    os.path.join(os.path.dirname(sys.executable), "..", "..")
+                )
                 asset = next((a for a in assets if a["name"].lower().endswith("-macos.zip")), None)
                 if not asset:
-                    root.after(0, lambda: messagebox.showerror(APP_NAME, "macOS update package not found in release."))
+                    root.after(0, lambda: messagebox.showerror(APP_NAME, "macOS update not found in release."))
                     return
                 dest = os.path.join(tmp_dir, asset["name"])
                 _download_asset(asset["browser_download_url"], dest)
                 with zipfile.ZipFile(dest, "r") as z:
                     z.extractall(tmp_dir)
-                install_sh = os.path.join(tmp_dir, "install.sh")
-                if os.path.exists(install_sh):
-                    os.chmod(install_sh, 0o755)
-                    script = f'do shell script "bash {shlex.quote(install_sh)}" with administrator privileges'
-                    subprocess.Popen(["osascript", "-e", script])
-                    root.after(0, lambda: messagebox.showinfo(APP_NAME,
-                        f"Installing v{tag}...\n\nRestart ITPanel Pro to complete the update."))
-                else:
-                    subprocess.Popen(["open", tmp_dir])
-                    root.after(0, lambda: messagebox.showinfo(APP_NAME,
-                        f"Downloaded to:\n{tmp_dir}\n\nDrag ITPanelPro.app to Applications to update."))
+                new_app = os.path.join(tmp_dir, "ITPanelPro.app")
+                if not os.path.isdir(new_app):
+                    raise RuntimeError("ITPanelPro.app not found in update package")
 
-            else:
-                # Linux: download tar.gz, extract, run install.sh via pkexec (polkit GUI auth)
+                # Detached script: waits for us to exit, replaces bundle, relaunches
+                updater = os.path.join(tmp_dir, "apply_update.sh")
+                with open(updater, "w") as f:
+                    f.write(f"""#!/bin/bash
+sleep 2
+rm -rf {shlex.quote(app_bundle)}
+cp -R {shlex.quote(new_app)} {shlex.quote(app_bundle)} 2>/dev/null \\
+  || sudo cp -R {shlex.quote(new_app)} {shlex.quote(app_bundle)}
+open -a {shlex.quote(app_bundle)}
+""")
+                os.chmod(updater, 0o755)
+                subprocess.Popen(["bash", updater])
+                try:
+                    icon.notify(f"Installing v{tag} — restarting...", title=APP_NAME)
+                except Exception:
+                    pass
+                time.sleep(1)
+                icon.stop()
+                root.after(0, root.quit)
+
+            elif system == "Linux" and getattr(sys, "frozen", False):
+                current_binary = sys.executable  # e.g. /opt/itpanel-pro/ITPanelPro
                 asset = next((a for a in assets if a["name"].lower().endswith("-linux.tar.gz")), None)
                 if not asset:
-                    root.after(0, lambda: messagebox.showerror(APP_NAME, "Linux update package not found in release."))
+                    root.after(0, lambda: messagebox.showerror(APP_NAME, "Linux update not found in release."))
                     return
                 dest = os.path.join(tmp_dir, asset["name"])
                 _download_asset(asset["browser_download_url"], dest)
                 with tarfile.open(dest, "r:gz") as t:
                     t.extractall(tmp_dir)
-                install_sh = os.path.join(tmp_dir, "install.sh")
-                if os.path.exists(install_sh):
-                    os.chmod(install_sh, 0o755)
-                    has_pkexec = subprocess.run(["which", "pkexec"], capture_output=True).returncode == 0
-                    if has_pkexec:
-                        subprocess.Popen(["pkexec", "bash", install_sh])
-                        root.after(0, lambda: messagebox.showinfo(APP_NAME,
-                            f"Installing v{tag}...\n\nRestart ITPanel Pro to complete the update."))
-                    else:
-                        subprocess.Popen(["xdg-open", tmp_dir])
-                        root.after(0, lambda: messagebox.showinfo(APP_NAME,
-                            f"Downloaded to:\n{tmp_dir}\n\nRun install.sh as root to complete."))
-                else:
-                    subprocess.Popen(["xdg-open", tmp_dir])
-                    root.after(0, lambda: messagebox.showinfo(APP_NAME,
-                        f"Downloaded to:\n{tmp_dir}\n\nRun install.sh as root to complete."))
+                new_binary = os.path.join(tmp_dir, "ITPanelPro")
+                if not os.path.isfile(new_binary):
+                    raise RuntimeError("ITPanelPro binary not found in update package")
+                os.chmod(new_binary, 0o755)
+
+                # Detached script: waits for our PID to exit, replaces binary, relaunches
+                updater = os.path.join(tmp_dir, "apply_update.sh")
+                with open(updater, "w") as f:
+                    f.write(f"""#!/bin/bash
+PID={os.getpid()}
+while kill -0 "$PID" 2>/dev/null; do sleep 0.5; done
+cp -f {shlex.quote(new_binary)} {shlex.quote(current_binary)} 2>/dev/null \\
+  || sudo cp -f {shlex.quote(new_binary)} {shlex.quote(current_binary)}
+chmod +x {shlex.quote(current_binary)}
+nohup {shlex.quote(current_binary)} >/dev/null 2>&1 &
+disown
+""")
+                os.chmod(updater, 0o755)
+                subprocess.Popen(["bash", updater])
+                try:
+                    icon.notify(f"Installing v{tag} — restarting...", title=APP_NAME)
+                except Exception:
+                    pass
+                time.sleep(1)
+                icon.stop()
+                root.after(0, root.quit)
+
+            else:
+                # Dev mode (not frozen) — just notify, can't self-replace interpreter
+                try:
+                    icon.notify(f"{APP_NAME} v{tag} available.", title=APP_NAME)
+                except Exception:
+                    pass
 
         except Exception as exc:
             root.after(0, lambda: messagebox.showerror(APP_NAME, f"Update failed: {exc}"))
@@ -1531,21 +1574,14 @@ def run_app(config_paths, icon_path=None):
             time.sleep(300)
     threading.Thread(target=background_loop, daemon=True).start()
 
-    # Silent startup update check
+    # Silent startup update check — auto-installs on all platforms, no dialogs
     if config.get("check_for_updates", True):
         def startup_check():
             result = check_for_update()
             if not result:
                 return
             tag, release = result
-            if platform.system() == "Windows":
-                # Auto-install silently on Windows — Inno Setup handles closing and restarting
-                do_self_update(tag, release)
-            else:
-                try:
-                    icon.notify(f"{APP_NAME} v{tag} available — use Check for Updates to install.", title=APP_NAME)
-                except Exception:
-                    pass
+            do_self_update(tag, release)
         threading.Thread(target=startup_check, daemon=True).start()
 
     root.mainloop()
