@@ -18,6 +18,15 @@ import json
 import os
 import platform
 import shlex
+
+
+def _api_headers(config: dict) -> dict:
+    """Return auth headers for ITFlow API requests.
+
+    Passes the api_key in a header rather than a URL query parameter
+    so it is never written to web server access logs.
+    """
+    return {"X-Api-Key": config["api_key"]}
 import shutil
 import socket
 import subprocess
@@ -416,7 +425,7 @@ def flush_queue(config):
             base_url = config["itflow_base_url"].rstrip("/")
             resp = requests.post(
                 f"{base_url}/api/v1/tickets",
-                params={"api_key": config["api_key"]},
+                headers=_api_headers(config),
                 data=data,
                 files=files,
                 timeout=30,
@@ -480,7 +489,7 @@ def poll_ticket_updates(config, icon):
         try:
             resp = requests.get(
                 f"{base_url}/api/v1/tickets/{t['id']}",
-                params={"api_key": config["api_key"]},
+                headers=_api_headers(config),
                 timeout=15,
             )
             resp.raise_for_status()
@@ -515,7 +524,8 @@ def poll_ticket_chat(config, icon):
         try:
             resp = requests.get(
                 f"{base_url}/api/v1/tickets/{t['id']}/chat",
-                params={"api_key": config["api_key"], "since_id": last_chat_id},
+                params={"since_id": last_chat_id},
+                headers=_api_headers(config),
                 timeout=15,
             )
             if resp.status_code == 403:
@@ -567,11 +577,11 @@ def _sse_chat_listen(config, ticket_id, on_message, stop_event):
     """
     base_url = config["itflow_base_url"].rstrip("/")
     url = f"{base_url}/api/v1/tickets/{ticket_id}/chat"
-    params = {"api_key": config["api_key"], "stream": 1}
+    params = {"stream": 1}
 
     while not stop_event.is_set():
         try:
-            resp = requests.get(url, params=params, stream=True, timeout=(10, 75))
+            resp = requests.get(url, params=params, headers=_api_headers(config), stream=True, timeout=(10, 75))
             if resp.status_code == 403:
                 # Live chat module disabled server-side - no point retrying.
                 return
@@ -954,7 +964,7 @@ class TicketWindow:
         try:
             resp = requests.post(
                 url,
-                params={"api_key": cfg["api_key"]},
+                headers=_api_headers(cfg),
                 data=data,
                 files=files or None,
                 timeout=30,
@@ -1237,7 +1247,8 @@ class TicketChatWindow:
         try:
             resp = requests.get(
                 f"{base_url}/api/v1/tickets/{ticket_id}/chat",
-                params={"api_key": cfg["api_key"], "since_id": since_id},
+                params={"since_id": since_id},
+                headers=_api_headers(cfg),
                 timeout=15,
             )
             resp.raise_for_status()
@@ -1301,7 +1312,7 @@ class TicketChatWindow:
         try:
             resp = requests.post(
                 f"{base_url}/api/v1/tickets/{ticket_id}/chat",
-                params={"api_key": cfg["api_key"]},
+                headers=_api_headers(cfg),
                 json=body,
                 timeout=15,
             )
@@ -1349,7 +1360,8 @@ def run_app(config_paths, icon_path=None):
             base_url = config["itflow_base_url"].rstrip("/")
             resp = requests.get(
                 f"{base_url}/api/v1/ticket-categories",
-                params={"api_key": config["api_key"]}, timeout=15,
+                headers=_api_headers(config),
+                timeout=15,
             )
             resp.raise_for_status()
             ticket_window.categories = resp.json() or []
@@ -1437,7 +1449,9 @@ def run_app(config_paths, icon_path=None):
                 dest = os.path.join(tmp_dir, asset["name"])
                 _download_asset(asset["browser_download_url"], dest)
                 with zipfile.ZipFile(dest, "r") as z:
-                    z.extractall(tmp_dir)
+                    for name in z.namelist():
+                        if ".." not in name and not name.startswith("/"):
+                            z.extract(name, tmp_dir)
                 new_app = os.path.join(tmp_dir, "ITPanelPro.app")
                 if not os.path.isdir(new_app):
                     raise RuntimeError("ITPanelPro.app not found in update package")
@@ -1471,7 +1485,9 @@ open -a {shlex.quote(app_bundle)}
                 dest = os.path.join(tmp_dir, asset["name"])
                 _download_asset(asset["browser_download_url"], dest)
                 with tarfile.open(dest, "r:gz") as t:
-                    t.extractall(tmp_dir)
+                    for member in t.getmembers():
+                        if ".." not in member.name and not member.name.startswith("/"):
+                            t.extract(member, tmp_dir)
                 new_binary = os.path.join(tmp_dir, "ITPanelPro")
                 if not os.path.isfile(new_binary):
                     raise RuntimeError("ITPanelPro binary not found in update package")

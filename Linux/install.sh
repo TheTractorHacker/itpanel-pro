@@ -81,16 +81,20 @@ if [ -n "$ITFLOW_BASE_URL" ] && [ -n "$API_KEY" ] && [ -n "$CLIENT_ID" ]; then
         CONTACT_JSON="null"
     fi
 
-    cat > "$CONFIG_PATH" <<EOF
-{
-    "itflow_base_url": "$ITFLOW_BASE_URL",
-    "api_key": "$API_KEY",
-    "client_id": $CLIENT_ID,
-    "contact_id": $CONTACT_JSON,
-    "priority": "$PRIORITY"
+    python3 -c "
+import json, sys
+data = {
+    'itflow_base_url': sys.argv[1],
+    'api_key': sys.argv[2],
+    'client_id': int(sys.argv[3]),
+    'contact_id': int(sys.argv[4]) if sys.argv[4] != 'null' else None,
+    'priority': sys.argv[5],
 }
-EOF
-    chmod 644 "$CONFIG_PATH"
+with open(sys.argv[6], 'w') as f:
+    json.dump(data, f, indent=4)
+    f.write('\n')
+" "$ITFLOW_BASE_URL" "$API_KEY" "$CLIENT_ID" "$CONTACT_JSON" "$PRIORITY" "$CONFIG_PATH"
+    chmod 600 "$CONFIG_PATH"
 elif [ ! -f "$CONFIG_PATH" ]; then
     echo "No config.json exists and no connection settings were passed." >&2
     echo "Usage: $0 <itflow_base_url> <api_key> <client_id> [contact_id] [priority]" >&2
