@@ -53,8 +53,19 @@ $installerArgs = @(
     "/Priority=$Priority"
 )
 
-Write-Host "Running installer silently..."
-$proc = Start-Process -FilePath $installerPath -ArgumentList $installerArgs -Wait -PassThru
+Write-Host "Running installer silently (first install can take a minute or two if the Visual C++ Runtime needs to be downloaded)..."
+$proc = Start-Process -FilePath $installerPath -ArgumentList $installerArgs -PassThru
+
+# Start-Process -Wait gives no output until the process exits, which on a slow
+# link (waiting on the VC++ redist download inside the installer) looks
+# indistinguishable from a hung job in the RMM log. Poll instead so there's a
+# periodic heartbeat proving it's still working.
+$elapsed = 0
+while (-not $proc.HasExited) {
+    Start-Sleep -Seconds 15
+    $elapsed += 15
+    Write-Host "Still installing... (${elapsed}s elapsed)"
+}
 Write-Host "Installer exit code: $($proc.ExitCode)"
 
 Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue

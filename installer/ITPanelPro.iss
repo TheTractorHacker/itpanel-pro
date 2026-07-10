@@ -17,7 +17,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITPanel Pro"
-#define MyAppVersion "2.1.3"
+#define MyAppVersion "2.1.4"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITPanelPro.exe"
 #define OldAppId "{B7B6A6E1-6E0C-4C2D-9F2F-7C1D4A9E3B21}"
@@ -164,6 +164,59 @@ begin
   Result := True;
 end;
 
+// The tray app's exe (a PyInstaller onefile build) needs the VC++ 2015-2022
+// x64 runtime (VCRUNTIME140.dll etc) to load python312.dll at startup. Most
+// machines already have it (Windows Update / other software pulls it in),
+// but freshly-imaged or minimal machines onboarded via RMM may not, which
+// surfaces as "Failed to load Python DLL ... LoadLibrary: The specified
+// module could not be found" the first time the app runs. Detect and
+// silently install it here so that can't happen.
+function VCRedistInstalled(): Boolean;
+var
+  Version: String;
+begin
+  Result := RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64',
+    'Version', Version) and (Version <> '');
+end;
+
+// Updates the "Installing" page's status text so an interactive install
+// doesn't look frozen while the redist check/download/install (each a
+// blocking Exec call) runs. No-op under /VERYSILENT, where the page is
+// never shown.
+procedure SetInstallStatus(const Msg: String);
+begin
+  if not WizardSilent then
+  begin
+    WizardForm.StatusLabel.Caption := Msg;
+    WizardForm.StatusLabel.Repaint;
+  end;
+end;
+
+procedure InstallVCRedistIfNeeded;
+var
+  ResultCode: Integer;
+  TmpPath, DownloadCmd: String;
+begin
+  SetInstallStatus('Checking for the Visual C++ Runtime...');
+  if VCRedistInstalled() then
+    exit;
+
+  SetInstallStatus('Downloading the Visual C++ Runtime (needed to run ITPanel Pro)...');
+  TmpPath := ExpandConstant('{tmp}\vc_redist.x64.exe');
+  DownloadCmd := '-NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri ''https://aka.ms/vs/17/release/vc_redist.x64.exe'' -OutFile ''' + TmpPath + ''' -UseBasicParsing } catch {}"';
+
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), DownloadCmd, '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if FileExists(TmpPath) then
+  begin
+    SetInstallStatus('Installing the Visual C++ Runtime...');
+    Exec(TmpPath, '/install /quiet /norestart', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+
+  SetInstallStatus('Finishing installation...');
+end;
+
 procedure InitializeWizard;
 var
   ConfigPath, OldConfigPath, ExistingJson: String;
@@ -298,7 +351,10 @@ var
   ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
+  begin
+    InstallVCRedistIfNeeded;
     WriteConfigFile;
+  end;
 
   if CurStep = ssDone then
   begin
