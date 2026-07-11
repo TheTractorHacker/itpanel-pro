@@ -45,7 +45,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.1.8"
+VERSION = "2.1.9"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
 
 

@@ -17,7 +17,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITPanel Pro"
-#define MyAppVersion "2.1.8"
+#define MyAppVersion "2.1.9"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITPanelPro.exe"
 #define OldAppId "{B7B6A6E1-6E0C-4C2D-9F2F-7C1D4A9E3B21}"
@@ -70,6 +70,12 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
 [Code]
 var
   ConfigPage: TInputQueryWizardPage;
+  PickerPage: TWizardPage;
+  ClientSearchEdit, ContactSearchEdit: TNewEdit;
+  ClientSearchBtn, ContactSearchBtn: TNewButton;
+  ClientResultsBox, ContactResultsBox: TNewListBox;
+  ClientResultIds, ContactResultIds: TStringList;
+  PickerStatusLabel: TNewStaticText;
 
 // Extracts the value of a top-level "key": value pair from the simple,
 // known-format JSON written by WriteConfigFile below. Returns '' if the
@@ -137,6 +143,86 @@ begin
   end;
 
   Result := FallbackDefault;
+end;
+
+// Escapes a string for embedding inside a PowerShell single-quoted string
+// literal (only a literal ' needs doubling; unlike double-quoted PS
+// strings, $ and backslash aren't special so nothing else needs escaping).
+function PsSingleQuoteEscape(const S: String): String;
+begin
+  Result := S;
+  StringChangeEx(Result, '''', '''''', True);
+end;
+
+// Runs a small generated PowerShell script (writing it to {tmp} rather than
+// passing it as a -Command string, so values with spaces/quotes/apostrophes
+// - client names commonly have them - don't fight Windows command-line
+// quoting) and reads back the "id<TAB>name" lines it wrote. Returns False
+// if the request failed or matched nothing; Lines holds the raw output
+// either way (an "ERROR<TAB>..." line on failure).
+function RunItflowSearch(const Script: String; Lines: TStringList): Boolean;
+var
+  ScriptPath, OutPath: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  Lines.Clear;
+
+  ScriptPath := ExpandConstant('{tmp}\itflow_search.ps1');
+  OutPath := ExpandConstant('{tmp}\itflow_search_out.txt');
+  DeleteFile(OutPath);
+  SaveStringToFile(ScriptPath, Script, False);
+
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '"', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if not FileExists(OutPath) then
+    exit;
+
+  Lines.LoadFromFile(OutPath);
+  // Out-File -Encoding utf8 on Windows PowerShell 5.1 prepends a BOM; strip
+  // it defensively in case TStringList didn't already.
+  if (Lines.Count > 0) and (Length(Lines[0]) > 0) and (Ord(Lines[0][1]) = 65279) then
+    Lines[0] := Copy(Lines[0], 2, Length(Lines[0]) - 1);
+
+  Result := (Lines.Count > 0) and (Copy(Lines[0], 1, 5) <> 'ERROR');
+end;
+
+function SearchItflowClients(const BaseUrl, ApiKey, SearchTerm: String; Lines: TStringList): Boolean;
+var
+  Script, OutPath: String;
+begin
+  OutPath := ExpandConstant('{tmp}\itflow_search_out.txt');
+  Script :=
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    '$search = ''' + PsSingleQuoteEscape(SearchTerm) + '''' + #13#10 +
+    'try {' + #13#10 +
+    '  $uri = ''' + PsSingleQuoteEscape(BaseUrl) + '/api/v1/clients?limit=15&search='' + [uri]::EscapeDataString($search)' + #13#10 +
+    '  $resp = Invoke-RestMethod -Uri $uri -Headers @{ ''X-Api-Key'' = ''' + PsSingleQuoteEscape(ApiKey) + ''' } -UseBasicParsing' + #13#10 +
+    '  $resp.data | ForEach-Object { "$($_.id)`t$($_.name -replace ''`t'', '' '')" } | Out-File -FilePath ''' + PsSingleQuoteEscape(OutPath) + ''' -Encoding utf8' + #13#10 +
+    '} catch {' + #13#10 +
+    '  "ERROR`t" + $_.Exception.Message | Out-File -FilePath ''' + PsSingleQuoteEscape(OutPath) + ''' -Encoding utf8' + #13#10 +
+    '}' + #13#10;
+  Result := RunItflowSearch(Script, Lines);
+end;
+
+function SearchItflowContacts(const BaseUrl, ApiKey: String; ClientId: Integer; const SearchTerm: String; Lines: TStringList): Boolean;
+var
+  Script, OutPath: String;
+begin
+  OutPath := ExpandConstant('{tmp}\itflow_search_out.txt');
+  Script :=
+    '$ErrorActionPreference = ''Stop''' + #13#10 +
+    '$search = ''' + PsSingleQuoteEscape(SearchTerm) + '''' + #13#10 +
+    'try {' + #13#10 +
+    '  $uri = ''' + PsSingleQuoteEscape(BaseUrl) + '/api/v1/contacts?limit=15&client_id=' + IntToStr(ClientId) + '&search='' + [uri]::EscapeDataString($search)' + #13#10 +
+    '  $resp = Invoke-RestMethod -Uri $uri -Headers @{ ''X-Api-Key'' = ''' + PsSingleQuoteEscape(ApiKey) + ''' } -UseBasicParsing' + #13#10 +
+    '  $resp.data | ForEach-Object { "$($_.id)`t$($_.name -replace ''`t'', '' '')" } | Out-File -FilePath ''' + PsSingleQuoteEscape(OutPath) + ''' -Encoding utf8' + #13#10 +
+    '} catch {' + #13#10 +
+    '  "ERROR`t" + $_.Exception.Message | Out-File -FilePath ''' + PsSingleQuoteEscape(OutPath) + ''' -Encoding utf8' + #13#10 +
+    '}' + #13#10;
+  Result := RunItflowSearch(Script, Lines);
 end;
 
 // Silently uninstalls a previous "ITFlow Quick Ticket" install (old AppId)
@@ -229,6 +315,237 @@ begin
   VCRedistStillMissing := not VCRedistInstalled();
 end;
 
+// "Search" on the client box: looks up clients matching the typed text and
+// lists them below for the user to click. Requires the Base URL/API Key
+// from the previous page to already be filled in.
+procedure ClientSearchBtnClick(Sender: TObject);
+var
+  BaseUrl, ApiKey, Term: String;
+  Lines: TStringList;
+  I, TabPos: Integer;
+begin
+  BaseUrl := Trim(ConfigPage.Values[0]);
+  ApiKey := Trim(ConfigPage.Values[1]);
+  Term := Trim(ClientSearchEdit.Text);
+
+  if (BaseUrl = '') or (BaseUrl = 'https://') or (ApiKey = '') then
+  begin
+    PickerStatusLabel.Caption := 'Enter the ITFlow Base URL and API Key on the previous page first.';
+    exit;
+  end;
+  if Term = '' then
+  begin
+    PickerStatusLabel.Caption := 'Type part of the client name to search.';
+    exit;
+  end;
+
+  PickerStatusLabel.Caption := 'Searching...';
+  PickerStatusLabel.Repaint;
+
+  ClientResultsBox.Items.Clear;
+  ClientResultIds.Clear;
+
+  Lines := TStringList.Create;
+  try
+    if not SearchItflowClients(BaseUrl, ApiKey, Term, Lines) then
+    begin
+      if Lines.Count > 0 then
+        PickerStatusLabel.Caption := 'Search failed: ' + Lines[0]
+      else
+        PickerStatusLabel.Caption := 'Search failed - check the Base URL/API Key and your internet connection.';
+      exit;
+    end;
+
+    for I := 0 to Lines.Count - 1 do
+    begin
+      TabPos := Pos(#9, Lines[I]);
+      if TabPos = 0 then continue;
+      ClientResultIds.Add(Copy(Lines[I], 1, TabPos - 1));
+      ClientResultsBox.Items.Add(Copy(Lines[I], TabPos + 1, Length(Lines[I]) - TabPos));
+    end;
+
+    if ClientResultsBox.Items.Count = 0 then
+      PickerStatusLabel.Caption := 'No clients found matching "' + Term + '".'
+    else
+      PickerStatusLabel.Caption := IntToStr(ClientResultsBox.Items.Count) + ' client(s) found - select one below.';
+  finally
+    Lines.Free;
+  end;
+end;
+
+// Clicking a result fills in the Client ID field on the previous page (the
+// same field WriteConfigFile reads), and clears any previously picked
+// contact since it belonged to whatever client was selected before.
+procedure ClientResultsBoxClick(Sender: TObject);
+begin
+  if (ClientResultsBox.ItemIndex >= 0) and (ClientResultsBox.ItemIndex < ClientResultIds.Count) then
+  begin
+    ConfigPage.Values[2] := ClientResultIds[ClientResultsBox.ItemIndex];
+    PickerStatusLabel.Caption := 'Selected client: ' + ClientResultsBox.Items[ClientResultsBox.ItemIndex] +
+      ' (id ' + ConfigPage.Values[2] + ')';
+    ContactResultsBox.Items.Clear;
+    ContactResultIds.Clear;
+    ConfigPage.Values[3] := '';
+  end;
+end;
+
+// "Search" on the contact box: scoped to whatever Client ID is currently
+// set (manually typed, or from the client search above).
+procedure ContactSearchBtnClick(Sender: TObject);
+var
+  BaseUrl, ApiKey, Term: String;
+  ClientId: Integer;
+  Lines: TStringList;
+  I, TabPos: Integer;
+begin
+  BaseUrl := Trim(ConfigPage.Values[0]);
+  ApiKey := Trim(ConfigPage.Values[1]);
+  Term := Trim(ContactSearchEdit.Text);
+  ClientId := StrToIntDef(Trim(ConfigPage.Values[2]), 0);
+
+  if ClientId <= 0 then
+  begin
+    PickerStatusLabel.Caption := 'Pick or enter a Client first.';
+    exit;
+  end;
+  if Term = '' then
+  begin
+    PickerStatusLabel.Caption := 'Type part of the contact name to search.';
+    exit;
+  end;
+
+  PickerStatusLabel.Caption := 'Searching...';
+  PickerStatusLabel.Repaint;
+
+  ContactResultsBox.Items.Clear;
+  ContactResultIds.Clear;
+
+  Lines := TStringList.Create;
+  try
+    if not SearchItflowContacts(BaseUrl, ApiKey, ClientId, Term, Lines) then
+    begin
+      if Lines.Count > 0 then
+        PickerStatusLabel.Caption := 'Search failed: ' + Lines[0]
+      else
+        PickerStatusLabel.Caption := 'Search failed - check the Base URL/API Key and your internet connection.';
+      exit;
+    end;
+
+    for I := 0 to Lines.Count - 1 do
+    begin
+      TabPos := Pos(#9, Lines[I]);
+      if TabPos = 0 then continue;
+      ContactResultIds.Add(Copy(Lines[I], 1, TabPos - 1));
+      ContactResultsBox.Items.Add(Copy(Lines[I], TabPos + 1, Length(Lines[I]) - TabPos));
+    end;
+
+    if ContactResultsBox.Items.Count = 0 then
+      PickerStatusLabel.Caption := 'No contacts found matching "' + Term + '".'
+    else
+      PickerStatusLabel.Caption := IntToStr(ContactResultsBox.Items.Count) + ' contact(s) found - select one below.';
+  finally
+    Lines.Free;
+  end;
+end;
+
+procedure ContactResultsBoxClick(Sender: TObject);
+begin
+  if (ContactResultsBox.ItemIndex >= 0) and (ContactResultsBox.ItemIndex < ContactResultIds.Count) then
+  begin
+    ConfigPage.Values[3] := ContactResultIds[ContactResultsBox.ItemIndex];
+    PickerStatusLabel.Caption := 'Selected contact: ' + ContactResultsBox.Items[ContactResultsBox.ItemIndex] +
+      ' (id ' + ConfigPage.Values[3] + ')';
+  end;
+end;
+
+// Builds the optional "Find Client / Contact" page: two search boxes with
+// result lists, laid out under the connection-settings page. Purely
+// additive - the Client ID/Contact ID fields on the previous page remain
+// the actual source of truth (WriteConfigFile only ever reads those), so a
+// layout glitch here can't break a install that just types the IDs in
+// directly instead.
+procedure CreatePickerPage;
+begin
+  PickerPage := CreateCustomPage(ConfigPage.ID,
+    'Find Client / Contact (optional)',
+    'Search ITFlow by name instead of typing numeric IDs - useful when deploying to lots of ' +
+    'clients by hand. Skip this page to keep whatever you entered on the previous page.');
+
+  ClientResultIds := TStringList.Create;
+  ContactResultIds := TStringList.Create;
+
+  with TNewStaticText.Create(PickerPage) do
+  begin
+    Parent := PickerPage.Surface;
+    Left := 0;
+    Top := 0;
+    Width := PickerPage.SurfaceWidth;
+    Caption := 'Client:';
+  end;
+
+  ClientSearchEdit := TNewEdit.Create(PickerPage);
+  ClientSearchEdit.Parent := PickerPage.Surface;
+  ClientSearchEdit.Left := 0;
+  ClientSearchEdit.Top := ScaleY(18);
+  ClientSearchEdit.Width := PickerPage.SurfaceWidth - ScaleX(90);
+
+  ClientSearchBtn := TNewButton.Create(PickerPage);
+  ClientSearchBtn.Parent := PickerPage.Surface;
+  ClientSearchBtn.Left := ClientSearchEdit.Left + ClientSearchEdit.Width + ScaleX(8);
+  ClientSearchBtn.Top := ClientSearchEdit.Top - ScaleY(2);
+  ClientSearchBtn.Width := ScaleX(82);
+  ClientSearchBtn.Height := ClientSearchEdit.Height + ScaleY(4);
+  ClientSearchBtn.Caption := '&Search';
+  ClientSearchBtn.OnClick := @ClientSearchBtnClick;
+
+  ClientResultsBox := TNewListBox.Create(PickerPage);
+  ClientResultsBox.Parent := PickerPage.Surface;
+  ClientResultsBox.Left := 0;
+  ClientResultsBox.Top := ClientSearchEdit.Top + ClientSearchEdit.Height + ScaleY(6);
+  ClientResultsBox.Width := PickerPage.SurfaceWidth;
+  ClientResultsBox.Height := ScaleY(70);
+  ClientResultsBox.OnClick := @ClientResultsBoxClick;
+
+  with TNewStaticText.Create(PickerPage) do
+  begin
+    Parent := PickerPage.Surface;
+    Left := 0;
+    Top := ClientResultsBox.Top + ClientResultsBox.Height + ScaleY(12);
+    Width := PickerPage.SurfaceWidth;
+    Caption := 'Contact (optional):';
+  end;
+
+  ContactSearchEdit := TNewEdit.Create(PickerPage);
+  ContactSearchEdit.Parent := PickerPage.Surface;
+  ContactSearchEdit.Left := 0;
+  ContactSearchEdit.Top := ClientResultsBox.Top + ClientResultsBox.Height + ScaleY(30);
+  ContactSearchEdit.Width := PickerPage.SurfaceWidth - ScaleX(90);
+
+  ContactSearchBtn := TNewButton.Create(PickerPage);
+  ContactSearchBtn.Parent := PickerPage.Surface;
+  ContactSearchBtn.Left := ContactSearchEdit.Left + ContactSearchEdit.Width + ScaleX(8);
+  ContactSearchBtn.Top := ContactSearchEdit.Top - ScaleY(2);
+  ContactSearchBtn.Width := ScaleX(82);
+  ContactSearchBtn.Height := ContactSearchEdit.Height + ScaleY(4);
+  ContactSearchBtn.Caption := 'S&earch';
+  ContactSearchBtn.OnClick := @ContactSearchBtnClick;
+
+  ContactResultsBox := TNewListBox.Create(PickerPage);
+  ContactResultsBox.Parent := PickerPage.Surface;
+  ContactResultsBox.Left := 0;
+  ContactResultsBox.Top := ContactSearchEdit.Top + ContactSearchEdit.Height + ScaleY(6);
+  ContactResultsBox.Width := PickerPage.SurfaceWidth;
+  ContactResultsBox.Height := ScaleY(70);
+  ContactResultsBox.OnClick := @ContactResultsBoxClick;
+
+  PickerStatusLabel := TNewStaticText.Create(PickerPage);
+  PickerStatusLabel.Parent := PickerPage.Surface;
+  PickerStatusLabel.Left := 0;
+  PickerStatusLabel.Top := ContactResultsBox.Top + ContactResultsBox.Height + ScaleY(12);
+  PickerStatusLabel.Width := PickerPage.SurfaceWidth;
+  PickerStatusLabel.Caption := '';
+end;
+
 procedure InitializeWizard;
 var
   ConfigPath, OldConfigPath, ExistingJson: String;
@@ -252,8 +569,8 @@ begin
   ConfigPage := CreateInputQueryPage(wpSelectDir,
     'ITFlow Connection Settings',
     'Configure this install to talk to your ITFlow instance',
-    'API key: Admin > API Keys. Client ID: on the client''s page in ITFlow. ' +
-    'Existing settings are pre-filled and kept on upgrades unless changed.');
+    'API key: Admin > API Keys. Client ID: on the client''s page in ITFlow, or leave blank and ' +
+    'search for it on the next page. Existing settings are pre-filled and kept on upgrades unless changed.');
 
   ConfigPage.Add('ITFlow Base URL (e.g. https://itflow.example.com):', False);
   ConfigPage.Add('API Key:', False);
@@ -266,6 +583,8 @@ begin
   ConfigPage.Values[2] := ConfigDefault('ClientId', 'client_id', ExistingJson, '');
   ConfigPage.Values[3] := ConfigDefault('ContactId', 'contact_id', ExistingJson, '');
   ConfigPage.Values[4] := ConfigDefault('Priority', 'priority', ExistingJson, 'Medium');
+
+  CreatePickerPage;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -287,11 +606,14 @@ begin
       Result := False;
       exit;
     end;
+  end;
 
+  if CurPageID = PickerPage.ID then
+  begin
     if (Trim(ConfigPage.Values[2]) = '') or
        (StrToIntDef(Trim(ConfigPage.Values[2]), -1) < 0) then
     begin
-      MsgBox('Please enter a valid numeric Client ID.', mbError, MB_OK);
+      MsgBox('Enter a Client ID on the previous page, or search for and select a client above.', mbError, MB_OK);
       Result := False;
       exit;
     end;
