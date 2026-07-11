@@ -1,10 +1,29 @@
 # ITPanel Pro
 
+[![Latest release](https://img.shields.io/github/v/release/TheTractorHacker/itpanel-pro?include_prereleases&label=release)](https://github.com/TheTractorHacker/itpanel-pro/releases/latest)
+[![Build apps and installers](https://github.com/TheTractorHacker/itpanel-pro/actions/workflows/build.yml/badge.svg)](https://github.com/TheTractorHacker/itpanel-pro/actions/workflows/build.yml)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
+
 A lightweight tray/menu bar app that lets end users submit an ITFlow support
 ticket — with an optional screenshot or file attachment — in a few clicks,
 with no portal login. Intended for mass deployment via RMM, with all
 connection settings (ITFlow URL, API key, client ID, etc.) configured at
 install time so the end user never sees credentials.
+
+## Screenshots
+
+<table>
+<tr>
+<td align="center" width="34%"><b>New Ticket</b></td>
+<td align="center" width="33%"><b>My Recent Tickets</b></td>
+<td align="center" width="33%"><b>Live Chat</b></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/ticket_window.png" width="100%"></td>
+<td><img src="docs/screenshots/recent_tickets.png" width="100%"></td>
+<td><img src="docs/screenshots/chat_window.png" width="100%"></td>
+</tr>
+</table>
 
 ## Features
 
