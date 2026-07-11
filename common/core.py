@@ -45,8 +45,34 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.1.3"
+VERSION = "2.1.6"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
+
+
+def _notify(icon, message: str, title: str = APP_NAME):
+    """Show a desktop notification.
+
+    pystray's Icon.notify() (a legacy Shell_NotifyIcon balloon) is
+    unreliable on Windows 11: it can silently no-op depending on a per-app
+    toggle hidden behind right-clicking the tray icon itself - separate
+    from, and overriding, the "Notification Area Icons" Control Panel
+    setting most people know to check - with no exception raised either
+    way. See https://github.com/moses-palmer/pystray/issues/112. Show a
+    real toast via winotify (WinRT's toast API, via a bundled PowerShell
+    call) on Windows instead; macOS/Linux already notify reliably through
+    pystray's native backends there.
+    """
+    if platform.system() == "Windows":
+        try:
+            from winotify import Notification
+            Notification(app_id=APP_NAME, title=title, msg=message).show()
+            return
+        except Exception:
+            pass  # fall through to the pystray balloon as a last resort
+    try:
+        icon.notify(message, title=title)
+    except Exception:
+        pass
 
 ACCENT = "#2563eb"
 ACCENT_DARK = "#1d4ed8"
@@ -495,13 +521,11 @@ def poll_ticket_updates(config, icon):
             resp.raise_for_status()
             new_status = resp.json().get("status", t["status"])
             if new_status and new_status != t["status"]:
-                try:
-                    icon.notify(
-                        f"Ticket #{t['number']} \"{t['subject']}\" is now {new_status}",
-                        title="ITFlow Ticket Update",
-                    )
-                except Exception:
-                    pass
+                _notify(
+                    icon,
+                    f"Ticket #{t['number']} \"{t['subject']}\" is now {new_status}",
+                    title="ITFlow Ticket Update",
+                )
                 t["status"] = new_status
                 changed = True
         except Exception:
@@ -541,17 +565,11 @@ def poll_ticket_chat(config, icon):
 
         agent_messages = [m for m in messages if m.get("sender_type") == "agent"]
         if agent_messages:
-            try:
-                if len(agent_messages) == 1:
-                    body = agent_messages[0].get("message", "")
-                else:
-                    body = f"{len(agent_messages)} new messages"
-                icon.notify(
-                    f"Ticket #{t['number']}: {body}",
-                    title="ITFlow Live Chat",
-                )
-            except Exception:
-                pass
+            if len(agent_messages) == 1:
+                body = agent_messages[0].get("message", "")
+            else:
+                body = f"{len(agent_messages)} new messages"
+            _notify(icon, f"Ticket #{t['number']}: {body}", title="ITFlow Live Chat")
 
         t["last_chat_id"] = messages[-1]["id"]
         changed = True
@@ -616,13 +634,11 @@ _chat_listener_icon = None
 
 def _on_chat_event(icon, tracked_ticket, data):
     if data.get("sender_type") == "agent":
-        try:
-            icon.notify(
-                f"Ticket #{tracked_ticket['number']}: {data.get('message', '')}",
-                title="ITFlow Live Chat",
-            )
-        except Exception:
-            pass
+        _notify(
+            icon,
+            f"Ticket #{tracked_ticket['number']}: {data.get('message', '')}",
+            title="ITFlow Live Chat",
+        )
 
     # Keep last_chat_id in sync so the poll_ticket_chat() fallback doesn't
     # re-notify for messages already delivered live.
@@ -1419,10 +1435,7 @@ def run_app(config_paths, icon_path=None):
         system = platform.system()
         assets = release.get("assets", [])
 
-        try:
-            icon.notify(f"Downloading v{tag} update...", title=APP_NAME)
-        except Exception:
-            pass
+        _notify(icon, f"Downloading v{tag} update...", title=APP_NAME)
 
         try:
             tmp_dir = tempfile.mkdtemp(prefix="itpanelpro_update_")
@@ -1435,6 +1448,7 @@ def run_app(config_paths, icon_path=None):
                 dest = os.path.join(tmp_dir, asset["name"])
                 _download_asset(asset["browser_download_url"], dest)
                 subprocess.Popen([dest, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+                _notify(icon, f"Installing v{tag} — restarting...", title=APP_NAME)
 
             elif system == "Darwin" and getattr(sys, "frozen", False):
                 # Derive the .app bundle path from the running executable:
@@ -1468,10 +1482,7 @@ open -a {shlex.quote(app_bundle)}
 """)
                 os.chmod(updater, 0o755)
                 subprocess.Popen(["bash", updater])
-                try:
-                    icon.notify(f"Installing v{tag} — restarting...", title=APP_NAME)
-                except Exception:
-                    pass
+                _notify(icon, f"Installing v{tag} — restarting...", title=APP_NAME)
                 time.sleep(1)
                 icon.stop()
                 root.after(0, root.quit)
@@ -1507,20 +1518,14 @@ disown
 """)
                 os.chmod(updater, 0o755)
                 subprocess.Popen(["bash", updater])
-                try:
-                    icon.notify(f"Installing v{tag} — restarting...", title=APP_NAME)
-                except Exception:
-                    pass
+                _notify(icon, f"Installing v{tag} — restarting...", title=APP_NAME)
                 time.sleep(1)
                 icon.stop()
                 root.after(0, root.quit)
 
             else:
                 # Dev mode (not frozen) — just notify, can't self-replace interpreter
-                try:
-                    icon.notify(f"{APP_NAME} v{tag} available.", title=APP_NAME)
-                except Exception:
-                    pass
+                _notify(icon, f"{APP_NAME} v{tag} available.", title=APP_NAME)
 
         except Exception as exc:
             root.after(0, lambda: messagebox.showerror(APP_NAME, f"Update failed: {exc}"))
