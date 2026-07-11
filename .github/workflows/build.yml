@@ -15,9 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned explicitly (rather than relying on windows-latest's default)
+      # since the installer now refuses to run on non-x64 Windows
+      # (ArchitecturesAllowed=x64 in ITPanelPro.iss) - a 32-bit build here
+      # would produce an exe the installer itself would reject.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          architecture: 'x64'
 
       - name: Install Python dependencies
         working-directory: Windows

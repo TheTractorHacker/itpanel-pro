@@ -17,7 +17,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITPanel Pro"
-#define MyAppVersion "2.1.9"
+#define MyAppVersion "2.1.10"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITPanelPro.exe"
 #define OldAppId "{B7B6A6E1-6E0C-4C2D-9F2F-7C1D4A9E3B21}"
@@ -37,6 +37,14 @@ SolidCompression=yes
 SetupIconFile=..\Windows\assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 PrivilegesRequired=admin
+; The bundled ITPanelPro.exe is a 64-bit PyInstaller build (see
+; Windows/itpanel_pro.spec) - it can't run on 32-bit Windows at all.
+; Without ArchitecturesAllowed, the installer would happily install there
+; anyway (ArchitecturesInstallIn64BitMode only affects *how* it installs on
+; a 64-bit machine) and leave behind an exe that can never launch. Refuse
+; up front instead, with Inno's own "not supported on this version of
+; Windows" message.
+ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 ; Give the wizard a bit more room so the connection-settings page (5 fields
 ; plus description) doesn't get cut off.
