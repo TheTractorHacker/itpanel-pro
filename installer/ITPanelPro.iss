@@ -17,7 +17,7 @@
 ;     /ApiKey=XXXXXXXX /ClientId=5 /ContactId=12 /Priority=Medium
 
 #define MyAppName "ITPanel Pro"
-#define MyAppVersion "2.1.7"
+#define MyAppVersion "2.1.8"
 #define MyAppPublisher "Foley IT"
 #define MyAppExeName "ITPanelPro.exe"
 #define OldAppId "{B7B6A6E1-6E0C-4C2D-9F2F-7C1D4A9E3B21}"
@@ -192,11 +192,22 @@ begin
   end;
 end;
 
+// True if InstallVCRedistIfNeeded ran and the runtime still isn't present
+// afterward (download failed, e.g. no internet / URL blocked by a
+// firewall, or the silent redist install itself failed) - checked at
+// ssDone to warn the user instead of failing silently, since ITPanel Pro
+// will hit the same "Failed to load Python DLL" error this was meant to
+// prevent.
+var
+  VCRedistStillMissing: Boolean;
+
 procedure InstallVCRedistIfNeeded;
 var
   ResultCode: Integer;
   TmpPath, DownloadCmd: String;
 begin
+  VCRedistStillMissing := False;
+
   SetInstallStatus('Checking for the Visual C++ Runtime...');
   if VCRedistInstalled() then
     exit;
@@ -215,6 +226,7 @@ begin
   end;
 
   SetInstallStatus('Finishing installation...');
+  VCRedistStillMissing := not VCRedistInstalled();
 end;
 
 procedure InitializeWizard;
@@ -366,5 +378,20 @@ begin
     if Pos('itpanelpro_update_', Lowercase(ExtractFileName(SrcDir))) = 1 then
       Exec(ExpandConstant('{cmd}'), '/C ping -n 3 127.0.0.1 >nul & rmdir /s /q "' + SrcDir + '"',
         '', SW_HIDE, ewNoWait, ResultCode);
+
+    // Warn rather than fail silently if we couldn't get the VC++ Runtime
+    // installed (e.g. no internet access, or the URL is blocked by a
+    // firewall) - otherwise ITPanel Pro will hit exactly the
+    // "Failed to load Python DLL" error this was meant to prevent, with no
+    // clue why. MsgBox is auto-answered (not actually shown) under
+    // /SUPPRESSMSGBOXES, so this only surfaces during an interactive run;
+    // unattended/RMM deploys get the equivalent check in
+    // deploy_itpanelpro.ps1 after the install instead.
+    if VCRedistStillMissing then
+      MsgBox('ITPanel Pro installed, but the Visual C++ Runtime it needs could not be ' +
+        'downloaded or installed automatically (no internet access, or the download URL ' +
+        'is blocked). If the app fails to start, install it manually from ' +
+        'https://aka.ms/vs/17/release/vc_redist.x64.exe and try again.',
+        mbInformation, MB_OK);
   end;
 end;

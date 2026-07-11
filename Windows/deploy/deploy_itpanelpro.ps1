@@ -68,6 +68,16 @@ while (-not $proc.HasExited) {
 }
 Write-Host "Installer exit code: $($proc.ExitCode)"
 
+# The installer's own "VC++ Runtime couldn't be installed" warning is a
+# MsgBox, which /SUPPRESSMSGBOXES auto-answers without ever showing - so it
+# never reaches this job's log. Do the same registry check here instead,
+# so a client stuck without the runtime (no internet, blocked URL) is
+# flagged now rather than discovered later as a silent "app won't start".
+$vcRedistKey = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+if (-not (Test-Path $vcRedistKey)) {
+    Write-Host "WARNING: Visual C++ Runtime not detected after install - ITPanel Pro may fail to start with 'Failed to load Python DLL'. Install it manually: https://aka.ms/vs/17/release/vc_redist.x64.exe"
+}
+
 Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
 
 # Launch now for the active interactive session, if any (the installer's

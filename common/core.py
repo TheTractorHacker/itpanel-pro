@@ -45,11 +45,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "ITPanel Pro"
-VERSION = "2.1.6"
+VERSION = "2.1.8"
 GITHUB_REPO = "TheTractorHacker/itpanel-pro"
 
 
-def _notify(icon, message: str, title: str = APP_NAME):
+def _notify(icon, message: str, title: str = APP_NAME, chat: bool = False):
     """Show a desktop notification.
 
     pystray's Icon.notify() (a legacy Shell_NotifyIcon balloon) is
@@ -61,11 +61,16 @@ def _notify(icon, message: str, title: str = APP_NAME):
     real toast via winotify (WinRT's toast API, via a bundled PowerShell
     call) on Windows instead; macOS/Linux already notify reliably through
     pystray's native backends there.
+
+    chat: use the IM notification sound instead of the generic default
+    (winotify toasts are silent unless a sound is explicitly set).
     """
     if platform.system() == "Windows":
         try:
-            from winotify import Notification
-            Notification(app_id=APP_NAME, title=title, msg=message).show()
+            from winotify import Notification, audio
+            toast = Notification(app_id=APP_NAME, title=title, msg=message)
+            toast.set_audio(audio.IM if chat else audio.Default, loop=False)
+            toast.show()
             return
         except Exception:
             pass  # fall through to the pystray balloon as a last resort
@@ -131,6 +136,38 @@ def build_tray_icon_image(icon_path, branding_logo=None):
     draw.ellipse([2, 2, size - 3, size - 3], fill=(37, 99, 235, 255))
     draw.rectangle([14, 22, size - 15, size - 22], fill=(255, 255, 255, 255))
     return img
+
+
+_badged_icon_cache = {}  # id(base image) -> badged copy, built lazily once
+
+
+def _tray_icon_with_badge(base_image):
+    cached = _badged_icon_cache.get(id(base_image))
+    if cached is not None:
+        return cached
+    img = base_image.convert("RGBA").copy()
+    w, h = img.size
+    r = max(8, w // 4)
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([w - r, 0, w, r], fill=(220, 38, 38, 255), outline=(255, 255, 255, 255), width=2)
+    _badged_icon_cache[id(base_image)] = img
+    return img
+
+
+def set_chat_unread(icon, unread: bool):
+    """Toggle a small red badge on the tray icon for unread live-chat messages.
+
+    Reads the un-badged image from icon._base_image (set once in run_app)
+    rather than taking it as a parameter, so callers that only have `icon`
+    (poll_ticket_chat, _on_chat_event) don't need to thread it through.
+    """
+    base = getattr(icon, "_base_image", None)
+    if base is None:
+        return
+    try:
+        icon.icon = _tray_icon_with_badge(base) if unread else base
+    except Exception:
+        pass
 
 
 def _darken(hex_color, factor=0.82):
@@ -569,7 +606,8 @@ def poll_ticket_chat(config, icon):
                 body = agent_messages[0].get("message", "")
             else:
                 body = f"{len(agent_messages)} new messages"
-            _notify(icon, f"Ticket #{t['number']}: {body}", title="ITFlow Live Chat")
+            _notify(icon, f"Ticket #{t['number']}: {body}", title="ITFlow Live Chat", chat=True)
+            set_chat_unread(icon, True)
 
         t["last_chat_id"] = messages[-1]["id"]
         changed = True
@@ -638,7 +676,9 @@ def _on_chat_event(icon, tracked_ticket, data):
             icon,
             f"Ticket #{tracked_ticket['number']}: {data.get('message', '')}",
             title="ITFlow Live Chat",
+            chat=True,
         )
+        set_chat_unread(icon, True)
 
     # Keep last_chat_id in sync so the poll_ticket_chat() fallback doesn't
     # re-notify for messages already delivered live.
@@ -1135,9 +1175,10 @@ class TicketChatWindow:
 
     POLL_INTERVAL_MS = 15000
 
-    def __init__(self, root, config):
+    def __init__(self, root, config, mark_read=None):
         self.root = root
         self.config = config
+        self.mark_read = mark_read
         self.window = None
         self.text = None
         self.entry = None
@@ -1150,6 +1191,8 @@ class TicketChatWindow:
         self._seen_ids = set()
 
     def show(self, ticket_id, ticket_number, ticket_subject):
+        if self.mark_read:
+            self.mark_read()
         self._stop_sse()
         self.ticket_id = ticket_id
         self.ticket_number = ticket_number
@@ -1365,8 +1408,14 @@ def run_app(config_paths, icon_path=None):
 
     tray_image = build_tray_icon_image(icon_path, branding_logo=config.get("branding_logo"))
 
+    def mark_chat_read():
+        # `icon` is assigned further down in this function - safe since this
+        # is only ever called later, from a chat window the user opened
+        # (i.e. well after the tray icon exists and the event loop is running).
+        set_chat_unread(icon, False)
+
     ticket_window = TicketWindow(root, config, icon_path=icon_path)
-    chat_window = TicketChatWindow(root, config)
+    chat_window = TicketChatWindow(root, config, mark_read=mark_chat_read)
     recent_window = RecentTicketsWindow(root, config, chat_window=chat_window)
 
     # Load ticket categories in the background so the dropdown is ready
@@ -1561,6 +1610,7 @@ disown
     )
 
     icon = pystray.Icon(APP_NAME, tray_image, APP_NAME, menu)
+    icon._base_image = tray_image  # read by set_chat_unread() to build/clear the badge
 
     global _chat_listener_config, _chat_listener_icon
     _chat_listener_config = config
